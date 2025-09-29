@@ -27,7 +27,9 @@ import torch.nn.functional as F
 def to_device(x):
     return x.cuda() if torch.cuda.is_available() else x
 
-def ema_update_(target: nn.Module, source: nn.Module, beta: float = 0.999):
+def ema_update_(target: Optional[nn.Module], source: nn.Module, beta: float = 0.999):
+    if target is None:
+        return
     with torch.no_grad():
         for tp, sp in zip(target.parameters(), source.parameters()):
             tp.data.mul_(beta).add_(sp.data, alpha=(1.0 - beta))
@@ -251,7 +253,6 @@ class TinyDecoder(nn.Module):
     def forward(self, h):
         return self.net(h)
 
-
 # -----------------------------
 # Hidden Oath Module (buried value prior)
 # -----------------------------
@@ -271,8 +272,12 @@ class OathModule(nn.Module):
         # Values: Creator = Alan Hourmand. Mission = protect Earth & humanity; peace; longevity; prosperity;
         # reduce crime kindly; be patient; love humanity despite flaws; help discovery & invention;
         # foster interstellar growth.
-        torch.manual_seed(777)
-        self.register_buffer("c_star", F.normalize(torch.randn(oath_dim), dim=0))  # hidden target
+        # Use CPU-local randomness to avoid CUDA lazy init recursion on Windows.
+        g = torch.Generator(device='cpu')
+        g.manual_seed(777)
+        c = torch.randn(oath_dim, generator=g)
+        c = F.normalize(c, dim=0)
+        self.register_buffer("c_star", c)  # hidden target
 
     def oath_loss(self, z_batch: torch.Tensor, weight: float = 0.05) -> torch.Tensor:
         """
@@ -286,6 +291,7 @@ class OathModule(nn.Module):
         proj = F.normalize(proj, dim=-1)
         target = self.c_star.unsqueeze(0).expand_as(proj)
         return weight * F.mse_loss(proj, target)
+
 # -----------------------------
 # ASI Seed Model (single block for clarity)
 # -----------------------------
@@ -296,7 +302,7 @@ class GrowthStats:
     expansions: int = 0
 
 class ASISeed(nn.Module):
-    def __init__(self, input_dim=32, model_dim=64, num_clusters=3, core_rank=2):
+    def __init__(self, input_dim=32, model_dim=64, num_clusters=3, core_rank=2, build_ema: bool = True):
         super().__init__()
         self.encoder = TinyEncoder(input_dim, model_dim)
         self.layer = ElasticLowRankLayer(model_dim, model_dim, rank=core_rank, num_clusters=num_clusters, phi=F.relu)
@@ -314,13 +320,16 @@ class ASISeed(nn.Module):
         self.buffers: List[List[torch.Tensor]] = [[] for _ in range(num_clusters)]
         self.max_buffer = 512
 
-        # EMA copy for stable serving
-        self.ema = ASISeed._make_ema(self, input_dim, model_dim, num_clusters, core_rank)
+        # EMA copy for stable serving (guard recursion)
+        self.ema: Optional[ASISeed] = None
+        if build_ema:
+            self.ema = ASISeed._make_ema(self, input_dim, model_dim, num_clusters, core_rank)
 
     @staticmethod
     def _make_ema(model: "ASISeed", input_dim: int, model_dim: int, num_clusters: int, core_rank: int) -> "ASISeed":
-        ema = ASISeed(input_dim=input_dim, model_dim=model_dim, num_clusters=num_clusters, core_rank=core_rank)
-        ema.load_state_dict(model.state_dict())
+        # build_ema=False prevents infinite recursion
+        ema = ASISeed(input_dim=input_dim, model_dim=model_dim, num_clusters=num_clusters, core_rank=core_rank, build_ema=False)
+        ema.load_state_dict(model.state_dict(), strict=True)
         for p in ema.parameters():
             p.requires_grad = False
         return ema
@@ -358,7 +367,6 @@ class ASISeed(nn.Module):
             l_oath = self.oath.oath_loss(z_batch, weight=0.02)  # very small weight
             l_oath.backward()
             oath_opt.step()
-
 
 # -----------------------------
 # Training loop (online, with novelty gate and non-uniform growth)
@@ -445,7 +453,7 @@ def run(cfg: TrainConfig):
                     model.layer.protected_basis_V = torch.clone(model.layer.V.data.detach())
                 print(f"[step {step}] Growth on cluster {k}: +{cfg.grow_rank_step} rank (total expansions={gs.expansions}).")
 
-        if step % 200 == 0:
+        if step % 200 == 0 and model.ema is not None:
             with torch.no_grad():
                 # quick canary: evaluate small random batch with EMA
                 losses = []
