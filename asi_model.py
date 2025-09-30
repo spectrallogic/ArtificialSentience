@@ -7,11 +7,15 @@
 # - EMA serving (recursion-safe; rebuild on growth)
 # - Hidden Oath codeword (dormant, consolidations only)
 # - Optional tiny heads for course tests (prediction, masked infill)
+# - Realtime 3D GUI (pyqtgraph) for latent space
 
 import argparse
 import random
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
+import numpy as np
+
+from asi_viz_rt import RealtimeViz  # realtime 3D viewer
 
 import torch
 import torch.nn as nn
@@ -350,7 +354,6 @@ class ASISeed(nn.Module):
 
         # 2) Copy protected bases so shapes match
         with torch.no_grad():
-            # Assigning to a registered buffer name keeps it registered
             ema.layer.protected_basis_V = model.layer.protected_basis_V.clone()
             ema.layer.protected_basis_U = model.layer.protected_basis_U.clone()
 
@@ -441,54 +444,68 @@ def run_basic(cfg: TrainConfig):
                     num_clusters=3, core_rank=cfg.core_rank).to(device)
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=cfg.lr)
 
-    for step in range(1, cfg.steps + 1):
-        x = to_device(stream.next()).to(device)
-        x_hat, k, z, h = model(x)
+    # Realtime visualizer
+    viz = RealtimeViz(model_dim=cfg.model_dim,
+                      num_clusters=model.num_clusters,
+                      max_points=6000)
 
-        with torch.no_grad():
-            dist = 1 - F.cosine_similarity(z, model.router.centroids[k], dim=0)
-        loss = F.mse_loss(x_hat, x)
-        if dist < cfg.novelty_dist_thresh:
-            loss = 0.2 * loss
+    try:
+        for step in range(1, cfg.steps + 1):
+            x = to_device(stream.next()).to(device)
+            x_hat, k, z, h = model(x)
 
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        if model.layer.V.grad is not None and model.layer.protected_basis_V.numel() > 0:
-            model.layer.V.grad[:] = orthogonalize_to_(model.layer.V.grad, model.layer.protected_basis_V)
-        opt.step()
-
-        # EMA update against private copy
-        ema_update_(model._ema, model, beta=cfg.ema_beta)
-
-        with torch.no_grad():
-            model.router.update_centroid(k, z.detach())
-        model.update_buffers(k, z.detach())
-
-        gs = model.stats[k]
-        gs.recent_losses.append(float(loss.detach().cpu())); gs.samples += 1
-        if len(gs.recent_losses) > cfg.plateau_window:
-            gs.recent_losses.pop(0)
-
-        if step % cfg.grow_check_every == 0 and len(gs.recent_losses) == cfg.plateau_window:
-            first = sum(gs.recent_losses[: cfg.plateau_window // 2]) / (cfg.plateau_window // 2)
-            last  = sum(gs.recent_losses[cfg.plateau_window // 2 :]) / (cfg.plateau_window // 2)
-            if (first - last) < cfg.plateau_improve_eps:
-                model.grow_cluster(k, grow_rank=cfg.grow_rank_step)   # <— rebuilds EMA too
-                gs.expansions += 1
-                model.consolidate_cluster(k)
-                with torch.no_grad():
-                    model.layer.protected_basis_V = torch.clone(model.layer.V.data.detach())
-                print(f"[step {step}] Growth on discovered cluster {k}: +{cfg.grow_rank_step} rank "
-                      f"(expansions={gs.expansions})")
-
-        if step % 200 == 0 and model._ema is not None:
             with torch.no_grad():
-                losses = []
-                for _ in range(32):
-                    xx = to_device(stream.next()).to(device)
-                    yy, kk, _z, _h = model._ema(xx)
-                    losses.append(float(F.mse_loss(yy, xx).cpu()))
-                print(f"[step {step}] EMA canary MSE={sum(losses)/len(losses):.4f} | last k={k} dist={dist:.3f}")
+                dist = 1 - F.cosine_similarity(z, model.router.centroids[k], dim=0)
+            loss = F.mse_loss(x_hat, x)
+            if dist < cfg.novelty_dist_thresh:
+                loss = 0.2 * loss
+
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            if model.layer.V.grad is not None and model.layer.protected_basis_V.numel() > 0:
+                model.layer.V.grad[:] = orthogonalize_to_(model.layer.V.grad, model.layer.protected_basis_V)
+            opt.step()
+
+            # EMA update against private copy
+            ema_update_(model._ema, model, beta=cfg.ema_beta)
+
+            with torch.no_grad():
+                model.router.update_centroid(k, z.detach())
+            model.update_buffers(k, z.detach())
+
+            # ---- Realtime viz update (throttled) ----
+            if step % 2 == 0:
+                cent = model.router.centroids.detach().cpu().numpy()
+                ranks = [model.layer.U_res[i].shape[1] for i in range(model.num_clusters)]
+                viz.send(z=z.detach().cpu().numpy(), k=int(k), centroids=cent, ranks=ranks)
+
+            gs = model.stats[k]
+            gs.recent_losses.append(float(loss.detach().cpu())); gs.samples += 1
+            if len(gs.recent_losses) > cfg.plateau_window:
+                gs.recent_losses.pop(0)
+
+            if step % cfg.grow_check_every == 0 and len(gs.recent_losses) == cfg.plateau_window:
+                first = sum(gs.recent_losses[: cfg.plateau_window // 2]) / (cfg.plateau_window // 2)
+                last  = sum(gs.recent_losses[cfg.plateau_window // 2 :]) / (cfg.plateau_window // 2)
+                if (first - last) < cfg.plateau_improve_eps:
+                    model.grow_cluster(k, grow_rank=cfg.grow_rank_step)   # <— rebuilds EMA too
+                    gs.expansions += 1
+                    model.consolidate_cluster(k)
+                    with torch.no_grad():
+                        model.layer.protected_basis_V = torch.clone(model.layer.V.data.detach())
+                    print(f"[step {step}] Growth on discovered cluster {k}: +{cfg.grow_rank_step} rank "
+                          f"(expansions={gs.expansions})")
+
+            if step % 200 == 0 and model._ema is not None:
+                with torch.no_grad():
+                    losses = []
+                    for _ in range(32):
+                        xx = to_device(stream.next()).to(device)
+                        yy, kk, _z, _h = model._ema(xx)
+                        losses.append(float(F.mse_loss(yy, xx).cpu()))
+                    print(f"[step {step}] EMA canary MSE={sum(losses)/len(losses):.4f} | last k={k} dist={dist:.3f}")
+    finally:
+        viz.close()
 
     return model
 
