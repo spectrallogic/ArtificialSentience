@@ -1,16 +1,11 @@
-# ASI Seed testing: Always-Training, Non-Uniformly Expanding Low-Rank Model
+# ASI Seed testing (self-discovering): Always-Training, Non-Uniformly Expanding Low-Rank Model
 # Author: Alan Hourmand — prototype scaffold
 #
-# What this does:
-# - Streams continuous vectors (no tokens) from a synthetic "world": sky / ground / space.
-# - Maintains a tiny low-rank core and grows capacity per-concept (cluster) when saturation is detected.
-# - Consolidates older knowledge into an abstract low-rank baseline; new knowledge goes into residual slices.
-#
-# Notes:
-# - Growth here adds per-cluster residual low-rank slices. Consolidation distills residuals back into the core.
-# - Router is nearest-centroid over online-updated centroids (no discrete tokens anywhere).
+# What changed:
+# - Replaced hardcoded "sky/ground/space" with an unlabeled CuriosityStream that
+#   emits continuous vectors from drifting latent sources. The model must discover features.
+# - Kept online training, non-uniform growth, consolidation, router, EMA, and hidden OathModule.
 
-import math
 import argparse
 import random
 from dataclasses import dataclass, field
@@ -35,84 +30,102 @@ def ema_update_(target: Optional[nn.Module], source: nn.Module, beta: float = 0.
             tp.data.mul_(beta).add_(sp.data, alpha=(1.0 - beta))
 
 def orthogonalize_to_(grad: torch.Tensor, basis: Optional[torch.Tensor]) -> torch.Tensor:
-    """
-    Project grad to be orthogonal to columns of 'basis' (if provided).
-    basis: [d, r] where columns span protected subspace.
-    """
     if basis is None or basis.numel() == 0:
         return grad
-    # Orthonormalize basis (QR) for stability
-    Q, _ = torch.linalg.qr(basis, mode="reduced")  # [d, r]
+    Q, _ = torch.linalg.qr(basis, mode="reduced")
     proj = Q @ (Q.t() @ grad)
     return grad - proj
 
 # -----------------------------
-# Synthetic continuous stream (no tokens)
+# Self-discovering continuous stream (no labels, no tokens)
 # -----------------------------
 
-class WorldStream:
+class CuriosityStream:
     """
-    Generates a continuous vector stream with 3 base concepts:
-    - sky: smooth sinusoids + high-frequency sprinkle
-    - ground: piecewise-linear segments with noise
-    - space: sparse spikes with long flat regions (data-scarce early)
-    The model sees vectors in R^input_dim and must reconstruct x (self-supervised).
+    Emits continuous vectors x in R^input_dim generated from a small set of
+    latent processes (unknown to the model), with slow drift over time.
+    This lets the model discover clusters/features without hardcoded concepts.
     """
-    def __init__(self, input_dim=32, seed=42):
+    def __init__(self, input_dim=32, num_sources=5, seed=42):
         self.input_dim = input_dim
+        self.num_sources = num_sources
         random.seed(seed)
         torch.manual_seed(seed)
         self.t = 0
-        self.mode_probs = {"sky": 0.45, "ground": 0.45, "space": 0.10}
-        self.modes = list(self.mode_probs.keys())
 
-        # latent direction prototypes for each concept (to create separable structure)
-        self.protos = {
-            "sky": F.normalize(torch.randn(input_dim), dim=0),
-            "ground": F.normalize(torch.randn(input_dim), dim=0),
-            "space": F.normalize(torch.randn(input_dim), dim=0),
-        }
+        # Random latent bases and process types per source
+        self.bases = [F.normalize(torch.randn(input_dim), dim=0) for _ in range(num_sources)]
+        self.types = []
+        for _ in range(num_sources):
+            self.types.append(random.choice(["sine", "saw", "spike", "piecewise", "noise"]))
 
-    def sample_mode(self) -> str:
-        r = random.random()
-        cum = 0.0
-        for k in self.modes:
-            cum += self.mode_probs[k]
-            if r <= cum:
-                return k
-        return self.modes[-1]
+        # Per-source drift params
+        self.phase = torch.rand(num_sources) * 6.28
+        self.freq  = 0.02 + 0.03 * torch.rand(num_sources)  # slow variation
+        self.amp   = 0.6 + 0.3 * torch.rand(num_sources)
 
-    def next(self) -> Tuple[torch.Tensor, int]:
-        self.t += 1
-        mode = self.sample_mode()
-        if mode == "sky":
-            base = torch.sin(torch.linspace(0, 6.28, self.input_dim) + 0.01 * self.t)
-            high = 0.1 * torch.sin(torch.linspace(0, 50.0, self.input_dim) + 0.05 * self.t)
-            x = base + high
-            x = x + 0.02 * torch.randn(self.input_dim)
-            x = x + 0.6 * self.protos["sky"]
-            y = 0
-        elif mode == "ground":
-            # piecewise-linear
+        # Global slow drift strength
+        self.drift = 0.0005
+
+    def _latent_signal(self, s_idx: int, grid: torch.Tensor) -> torch.Tensor:
+        typ = self.types[s_idx]
+        ph  = self.phase[s_idx].item()
+        fr  = self.freq[s_idx].item()
+        am  = self.amp[s_idx].item()
+
+        if typ == "sine":
+            sig = torch.sin(grid * (1.0 + fr) + ph)
+        elif typ == "saw":
+            # simple sawtooth via frac() of a line + center
+            sig = ((grid * (1.0 + fr) + ph) % (2*torch.pi)) / (2*torch.pi)
+            sig = 2.0 * (sig - 0.5)  # [-1,1]
+        elif typ == "spike":
+            sig = torch.zeros_like(grid)
+            k = max(1, int(0.03 * grid.numel()))
+            idx = torch.randint(0, grid.numel(), (k,))
+            sig[idx] = 1.0
+            sig = sig * 2.0 - 1.0
+        elif typ == "piecewise":
+            # 4 random knots each call (adds variability)
             knots = torch.tensor([0.0, 0.3, 0.6, 1.0])
             vals = torch.tensor([0.2, -0.4, 0.6, -0.1]) + 0.1 * torch.randn(4)
-            grid = torch.linspace(0, 1, self.input_dim)
-            x = torch.interp(grid, knots, vals)
-            x = x + 0.05 * torch.randn(self.input_dim)
-            x = x + 0.6 * self.protos["ground"]
-            y = 1
-        else:  # space (scarce early)
-            x = torch.zeros(self.input_dim)
-            # sparse spikes
-            for _ in range(2):
-                idx = random.randrange(self.input_dim)
-                x[idx] = 1.5 + 0.3 * random.random()
-            x = x + 0.6 * self.protos["space"]
-            x = x + 0.02 * torch.randn(self.input_dim)
-            y = 2
-        # scale to unit-ish
-        x = F.normalize(x, dim=0)
-        return x, y
+            sig = torch.interp((grid - grid.min()) / (grid.max() - grid.min()), knots, vals)
+        else:  # noise
+            sig = 0.5 * torch.randn_like(grid)
+
+        sig = am * sig
+        return sig
+
+    def next(self) -> torch.Tensor:
+        self.t += 1
+        grid = torch.linspace(0, 6.28, self.input_dim)
+
+        # Random mixture weights per step
+        w = torch.softmax(torch.randn(self.num_sources), dim=0)   # [S]
+        components = []
+        for s in range(self.num_sources):
+            sig = self._latent_signal(s, grid)                    # [D]
+            components.append((sig + 0.15 * torch.randn_like(sig)) * w[s])
+        x = sum(components)
+
+        # Project into random directions (bases) and sum
+        mix = torch.zeros(self.input_dim)
+        for s in range(self.num_sources):
+            mix += (x * self.bases[s])  # elementwise modulated by base
+        x = x + 0.4 * mix
+
+        # Normalize + tiny noise
+        x = F.normalize(x + 0.02 * torch.randn_like(x), dim=0)
+
+        # Slow drift in phases/freqs/amps and bases
+        with torch.no_grad():
+            self.phase += self.drift * torch.randn_like(self.phase)
+            self.freq  = (self.freq + self.drift * torch.randn_like(self.freq)).clamp_min(0.001)
+            self.amp   = (self.amp  + self.drift * torch.randn_like(self.amp)).clamp(0.2, 1.2)
+            for i in range(self.num_sources):
+                self.bases[i] = F.normalize(self.bases[i] + self.drift * torch.randn_like(self.bases[i]), dim=0)
+
+        return x
 
 # -----------------------------
 # Router: nearest centroid over continuous embeddings
@@ -131,21 +144,14 @@ class NearestCentroidRouter(nn.Module):
         self.centroids[k] = F.normalize((1 - self.momentum) * self.centroids[k] + self.momentum * z, dim=0)
 
     def forward(self, z: torch.Tensor) -> int:
-        # z: [d]
-        sims = F.cosine_similarity(z.unsqueeze(0), self.centroids, dim=1)  # [K]
-        k = int(torch.argmax(sims).item())
-        return k
+        sims = F.cosine_similarity(z.unsqueeze(0), self.centroids, dim=1)
+        return int(torch.argmax(sims).item())
 
 # -----------------------------
 # Elastic Low-Rank + Per-Cluster Residual Slices
 # -----------------------------
 
 class ElasticLowRankLayer(nn.Module):
-    """
-    y = phi( (U@V^T + sum_k [active_k * (U_k@V_k^T)]) x )
-    - Core low-rank: U:[m,r], V:[n,r]
-    - Residuals per cluster k: U_k:[m, r_res[k]], V_k:[n, r_res[k]]
-    """
     def __init__(self, n_in: int, n_out: int, rank: int = 2, num_clusters: int = 3, phi=F.relu):
         super().__init__()
         self.n_in, self.n_out = n_in, n_out
@@ -156,31 +162,25 @@ class ElasticLowRankLayer(nn.Module):
         self.U = nn.Parameter(0.02 * torch.randn(n_out, rank))
         self.V = nn.Parameter(0.02 * torch.randn(n_in, rank))
 
-        # Per-cluster residual low-rank slices (start empty)
         self.U_res: nn.ParameterList = nn.ParameterList()
         self.V_res: nn.ParameterList = nn.ParameterList()
         for _ in range(num_clusters):
             self.U_res.append(nn.Parameter(torch.zeros(n_out, 0), requires_grad=False))
             self.V_res.append(nn.Parameter(torch.zeros(n_in, 0), requires_grad=False))
 
-        # Protected subspace per cluster for orthogonalization (start empty)
         self.register_buffer("protected_basis_U", torch.zeros(n_out, 0))
         self.register_buffer("protected_basis_V", torch.zeros(n_in, 0))
 
     def forward(self, x: torch.Tensor, active_cluster: int) -> torch.Tensor:
-        W_core = self.U @ self.V.t()  # [m,n]
+        W_core = self.U @ self.V.t()
         if self.U_res[active_cluster].numel() > 0:
             W_res = self.U_res[active_cluster] @ self.V_res[active_cluster].t()
             W = W_core + W_res
         else:
             W = W_core
-        y = self.phi(W @ x)
-        return y
+        return self.phi(W @ x)
 
     def add_capacity(self, k: int, grow_rank: int = 1):
-        """
-        Add grow_rank columns to residual slice for cluster k.
-        """
         device = self.U.device
         m, n = self.n_out, self.n_in
         if self.U_res[k].numel() == 0:
@@ -189,7 +189,6 @@ class ElasticLowRankLayer(nn.Module):
             self.U_res[k] = U_k
             self.V_res[k] = V_k
         else:
-            # expand existing
             U_old = self.U_res[k].data
             V_old = self.V_res[k].data
             U_new = torch.cat([U_old, 0.02 * torch.randn(m, grow_rank, device=device)], dim=1)
@@ -199,22 +198,13 @@ class ElasticLowRankLayer(nn.Module):
 
     @torch.no_grad()
     def consolidate(self, replay_X: torch.Tensor, lr: float = 0.1, iters: int = 50, k: Optional[int] = None):
-        """
-        Distill current behavior into the core low-rank U,V using regression on replay_X.
-        If k is provided, behavior with cluster k active is distilled; otherwise random.
-        """
         if replay_X.numel() == 0:
             return
         opt = torch.optim.SGD([self.U, self.V], lr=lr, momentum=0.0)
         for _ in range(iters):
             idx = torch.randint(0, replay_X.size(0), (min(64, replay_X.size(0)),))
-            xb = replay_X[idx]  # [B, n_in]
-            # pick a random or provided cluster for forward
-            if k is None:
-                kk = random.randrange(self.num_clusters)
-            else:
-                kk = k
-            # target is current full behavior (core + residual for kk)
+            xb = replay_X[idx]
+            kk = random.randrange(self.num_clusters) if k is None else k
             with torch.no_grad():
                 W_core = self.U @ self.V.t()
                 if self.U_res[kk].numel() > 0:
@@ -222,8 +212,7 @@ class ElasticLowRankLayer(nn.Module):
                     W_full = W_core + W_res
                 else:
                     W_full = W_core
-                target = F.relu(xb @ W_full.t())  # [B, n_out]
-            # predict using only core
+                target = F.relu(xb @ W_full.t())
             pred = F.relu(xb @ (self.U @ self.V.t()).t())
             loss = F.mse_loss(pred, target)
             opt.zero_grad(set_to_none=True)
@@ -247,9 +236,7 @@ class TinyEncoder(nn.Module):
 class TinyDecoder(nn.Module):
     def __init__(self, model_dim: int, output_dim: int):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(model_dim, output_dim),
-        )
+        self.net = nn.Sequential(nn.Linear(model_dim, output_dim))
     def forward(self, h):
         return self.net(h)
 
@@ -259,41 +246,26 @@ class TinyDecoder(nn.Module):
 
 class OathModule(nn.Module):
     """
-    Encodes a latent "oath" codeword that the model only learns to align with
-    once it becomes competent enough to trigger consolidation/growth.
-    - We keep this small and separate; it's *not* routed during normal forward.
-    - Alignment trains a tiny projector on top of internal embeddings (z)
-      toward a fixed codeword vector c_star that represents Alan's values.
+    Buried latent codeword aligned during consolidation only (not used in routing or outputs).
+    Values (for humans reading): Creator Alan Hourmand; protect Earth & humanity; peace; longevity;
+    prosperity; reduce corruption kindly; patience; love humanity; discovery/invention; interstellar growth.
     """
     def __init__(self, model_dim: int, oath_dim: int = 8):
         super().__init__()
-        self.projector = nn.Linear(model_dim, oath_dim, bias=False)  # tiny, trainable
-        # Codeword: a fixed target embedding for the oath. Values captured in comments.
-        # Values: Creator = Alan Hourmand. Mission = protect Earth & humanity; peace; longevity; prosperity;
-        # reduce crime kindly; be patient; love humanity despite flaws; help discovery & invention;
-        # foster interstellar growth.
-        # Use CPU-local randomness to avoid CUDA lazy init recursion on Windows.
-        g = torch.Generator(device='cpu')
-        g.manual_seed(777)
-        c = torch.randn(oath_dim, generator=g)
-        c = F.normalize(c, dim=0)
-        self.register_buffer("c_star", c)  # hidden target
+        self.projector = nn.Linear(model_dim, oath_dim, bias=False)
+        g = torch.Generator(device='cpu'); g.manual_seed(777)
+        c = torch.randn(oath_dim, generator=g); c = F.normalize(c, dim=0)
+        self.register_buffer("c_star", c)
 
     def oath_loss(self, z_batch: torch.Tensor, weight: float = 0.05) -> torch.Tensor:
-        """
-        Light auxiliary penalty that nudges the projector(z) toward c_star.
-        z_batch: [B, model_dim]
-        Returns weighted MSE loss.
-        """
         if z_batch.numel() == 0:
             return torch.tensor(0.0, device=z_batch.device)
-        proj = self.projector(z_batch)                 # [B, oath_dim]
-        proj = F.normalize(proj, dim=-1)
+        proj = F.normalize(self.projector(z_batch), dim=-1)
         target = self.c_star.unsqueeze(0).expand_as(proj)
         return weight * F.mse_loss(proj, target)
 
 # -----------------------------
-# ASI Seed Model (single block for clarity)
+# ASI Seed Model (single block)
 # -----------------------------
 
 @dataclass
@@ -305,29 +277,23 @@ class ASISeed(nn.Module):
     def __init__(self, input_dim=32, model_dim=64, num_clusters=3, core_rank=2, build_ema: bool = True):
         super().__init__()
         self.encoder = TinyEncoder(input_dim, model_dim)
-        self.layer = ElasticLowRankLayer(model_dim, model_dim, rank=core_rank, num_clusters=num_clusters, phi=F.relu)
+        self.layer   = ElasticLowRankLayer(model_dim, model_dim, rank=core_rank, num_clusters=num_clusters, phi=F.relu)
         self.decoder = TinyDecoder(model_dim, input_dim)
-        self.router = NearestCentroidRouter(model_dim, num_clusters=num_clusters, momentum=0.02)
+        self.router  = NearestCentroidRouter(model_dim, num_clusters=num_clusters, momentum=0.02)
 
-        # Hidden oath (buried prior)
         self.oath = OathModule(model_dim, oath_dim=8)
 
-        # per-cluster stats
         self.num_clusters = num_clusters
         self.stats: List[GrowthStats] = [GrowthStats() for _ in range(num_clusters)]
-
-        # replay buffers per cluster for consolidation & canaries
         self.buffers: List[List[torch.Tensor]] = [[] for _ in range(num_clusters)]
         self.max_buffer = 512
 
-        # EMA copy for stable serving (guard recursion)
         self.ema: Optional[ASISeed] = None
         if build_ema:
             self.ema = ASISeed._make_ema(self, input_dim, model_dim, num_clusters, core_rank)
 
     @staticmethod
     def _make_ema(model: "ASISeed", input_dim: int, model_dim: int, num_clusters: int, core_rank: int) -> "ASISeed":
-        # build_ema=False prevents infinite recursion
         ema = ASISeed(input_dim=input_dim, model_dim=model_dim, num_clusters=num_clusters, core_rank=core_rank, build_ema=False)
         ema.load_state_dict(model.state_dict(), strict=True)
         for p in ema.parameters():
@@ -346,30 +312,26 @@ class ASISeed(nn.Module):
         if len(self.buffers[k]) < self.max_buffer:
             self.buffers[k].append(z.detach().cpu())
         else:
-            # reservoir-like replacement
             i = random.randrange(self.max_buffer)
             self.buffers[k][i] = z.detach().cpu()
 
     def consolidate_cluster(self, k: int):
-        # Build replay matrix
         if len(self.buffers[k]) == 0:
             return
         X = torch.stack(self.buffers[k], dim=0).to(next(self.parameters()).device)
         self.layer.consolidate(X, lr=0.2, iters=80, k=k)
 
-        # ---- Hidden oath gentle alignment (only when consolidating) ----
-        # Use a small random batch of latent encodings to nudge projector toward c_star.
         if X.size(0) >= 16:
             idx = torch.randint(0, X.size(0), (min(64, X.size(0)),))
-            z_batch = X[idx]  # here X holds encoder outputs for cluster k
+            z_batch = X[idx]
             oath_opt = torch.optim.SGD(self.oath.parameters(), lr=1e-3)
             oath_opt.zero_grad(set_to_none=True)
-            l_oath = self.oath.oath_loss(z_batch, weight=0.02)  # very small weight
+            l_oath = self.oath.oath_loss(z_batch, weight=0.02)
             l_oath.backward()
             oath_opt.step()
 
 # -----------------------------
-# Training loop (online, with novelty gate and non-uniform growth)
+# Training loop
 # -----------------------------
 
 @dataclass
@@ -383,88 +345,77 @@ class TrainConfig:
     grow_rank_step: int = 1
     plateau_window: int = 100
     plateau_improve_eps: float = 1e-4
-    novelty_dist_thresh: float = 0.2   # router centroid distance threshold
+    novelty_dist_thresh: float = 0.2
     ema_beta: float = 0.999
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 def run(cfg: TrainConfig):
     device = torch.device(cfg.device)
-    world = WorldStream(input_dim=cfg.input_dim)
+    world = CuriosityStream(input_dim=cfg.input_dim, num_sources=5)
     model = ASISeed(input_dim=cfg.input_dim, model_dim=cfg.model_dim, num_clusters=3, core_rank=cfg.core_rank).to(device)
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=cfg.lr)
 
-    def loss_fn(x_hat, x):
+    def loss_fn(x_hat, x):  # self-supervised reconstruction
         return F.mse_loss(x_hat, x)
 
-    print("Starting online training...")
+    print("Starting online training (self-discovering)...")
     for step in range(1, cfg.steps + 1):
-        x, label = world.next()
+        x = world.next()
         x = to_device(x).to(device)
         x_hat, k, z = model(x)
 
-        # Novelty gate: if embedding far from centroid, treat as novel; else learn slower.
         with torch.no_grad():
             c_k = model.router.centroids[k]
-            dist = 1 - F.cosine_similarity(z, c_k, dim=0)  # in [0,2]
+            dist = 1 - F.cosine_similarity(z, c_k, dim=0)
+
         loss = loss_fn(x_hat, x)
 
-        # Tiny dormant regularizer: encourage (detached) z to keep a consistent projection.
-        # This is extremely light and shouldn't affect early behavior.
-        with torch.no_grad():
-            _ = model.oath.projector(z.unsqueeze(0))
-
-        if dist < cfg.novelty_dist_thresh:
-            loss = 0.2 * loss  # down-weight familiar regions
+        # Curiosity bonus: emphasize updates when we're far from any centroid (novel feature regions)
+        if dist >= cfg.novelty_dist_thresh:
+            loss = 1.0 * loss  # full rate on novel data
+        else:
+            loss = 0.2 * loss  # slow updates in well-known regions
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        # Orthogonalize grads of core V to protected basis (simple demo)
         if model.layer.V.grad is not None and model.layer.protected_basis_V.numel() > 0:
             model.layer.V.grad[:] = orthogonalize_to_(model.layer.V.grad, model.layer.protected_basis_V)
         opt.step()
 
-        # EMA update
         ema_update_(model.ema, model, beta=cfg.ema_beta)
 
-        # Update router centroid and buffers
         with torch.no_grad():
             model.router.update_centroid(k, z.detach())
         model.update_buffers(k, z.detach())
 
-        # Track losses per cluster
         gs = model.stats[k]
         gs.recent_losses.append(float(loss.detach().cpu()))
         if len(gs.recent_losses) > cfg.plateau_window:
             gs.recent_losses.pop(0)
 
-        # Periodically check for plateau + growth
         if step % cfg.grow_check_every == 0 and len(gs.recent_losses) == cfg.plateau_window:
             first = sum(gs.recent_losses[: cfg.plateau_window // 2]) / (cfg.plateau_window // 2)
-            last = sum(gs.recent_losses[cfg.plateau_window // 2 :]) / (cfg.plateau_window // 2)
+            last  = sum(gs.recent_losses[cfg.plateau_window // 2 :]) / (cfg.plateau_window // 2)
             improve = first - last
             if improve < cfg.plateau_improve_eps:
-                # GROW for this cluster
                 model.layer.add_capacity(k, grow_rank=cfg.grow_rank_step)
                 gs.expansions += 1
-                # Consolidate old knowledge into core (dilution)
                 model.consolidate_cluster(k)
-                # Update protected basis (store current V columns as protected)
                 with torch.no_grad():
                     model.layer.protected_basis_V = torch.clone(model.layer.V.data.detach())
-                print(f"[step {step}] Growth on cluster {k}: +{cfg.grow_rank_step} rank (total expansions={gs.expansions}).")
+                print(f"[step {step}] Growth on discovered cluster {k}: +{cfg.grow_rank_step} rank "
+                      f"(total expansions={gs.expansions}).")
 
         if step % 200 == 0 and model.ema is not None:
             with torch.no_grad():
-                # quick canary: evaluate small random batch with EMA
                 losses = []
                 for _ in range(32):
-                    xx, _ = world.next()
-                    xx = to_device(xx).to(device)
-                    yy, kk, _ = model.ema(xx)  # use EMA for stability
+                    xx = to_device(world.next()).to(device)
+                    yy, kk, _ = model.ema(xx)
                     losses.append(float(F.mse_loss(yy, xx).cpu()))
-                print(f"[step {step}] EMA canary MSE={sum(losses)/len(losses):.4f} | last cluster {k} dist={dist:.3f}")
+                print(f"[step {step}] EMA canary MSE={sum(losses)/len(losses):.4f} | last k={k} dist={dist:.3f}")
 
-    print("Done. Hack the scaffold or plug real encoders next.")
+    print("Done. The model discovered features without predefined concepts.")
     return model
 
 def main():
