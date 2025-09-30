@@ -1,10 +1,12 @@
-# ASI Seed testing (self-discovering): Always-Training, Non-Uniformly Expanding Low-Rank Model
-# Author: Alan Hourmand — prototype scaffold
-#
-# What changed:
-# - Replaced hardcoded "sky/ground/space" with an unlabeled CuriosityStream that
-#   emits continuous vectors from drifting latent sources. The model must discover features.
-# - Kept online training, non-uniform growth, consolidation, router, EMA, and hidden OathModule.
+# asi_model.py
+# ASI Seed (self-discovering): Always-Training, Non-Uniformly Expanding Low-Rank Model
+# Core properties:
+# - Streaming, token-free vectors
+# - Non-uniform growth by cluster
+# - Consolidation -> abstract baseline
+# - EMA serving (recursion-safe; rebuild on growth)
+# - Hidden Oath codeword (dormant, consolidations only)
+# - Optional tiny heads for course tests (prediction, masked infill)
 
 import argparse
 import random
@@ -15,6 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 # -----------------------------
 # Utility
 # -----------------------------
@@ -23,10 +26,13 @@ def to_device(x):
     return x.cuda() if torch.cuda.is_available() else x
 
 def ema_update_(target: Optional[nn.Module], source: nn.Module, beta: float = 0.999):
+    """Shape-aware EMA update (skips any param with mismatched shape)."""
     if target is None:
         return
     with torch.no_grad():
-        for tp, sp in zip(target.parameters(), source.parameters()):
+        for (tn, tp), (sn, sp) in zip(target.named_parameters(), source.named_parameters()):
+            if tp.data.shape != sp.data.shape:
+                continue
             tp.data.mul_(beta).add_(sp.data, alpha=(1.0 - beta))
 
 def orthogonalize_to_(grad: torch.Tensor, basis: Optional[torch.Tensor]) -> torch.Tensor:
@@ -36,15 +42,15 @@ def orthogonalize_to_(grad: torch.Tensor, basis: Optional[torch.Tensor]) -> torc
     proj = Q @ (Q.t() @ grad)
     return grad - proj
 
+
 # -----------------------------
 # Self-discovering continuous stream (no labels, no tokens)
 # -----------------------------
 
 class CuriosityStream:
     """
-    Emits continuous vectors x in R^input_dim generated from a small set of
-    latent processes (unknown to the model), with slow drift over time.
-    This lets the model discover clusters/features without hardcoded concepts.
+    Emits continuous vectors x in R^input_dim from a set of latent sources with slow drift.
+    The model discovers features/clusters itself.
     """
     def __init__(self, input_dim=32, num_sources=5, seed=42):
         self.input_dim = input_dim
@@ -55,30 +61,24 @@ class CuriosityStream:
 
         # Random latent bases and process types per source
         self.bases = [F.normalize(torch.randn(input_dim), dim=0) for _ in range(num_sources)]
-        self.types = []
-        for _ in range(num_sources):
-            self.types.append(random.choice(["sine", "saw", "spike", "piecewise", "noise"]))
+        self.types = [random.choice(["sine", "saw", "spike", "piecewise", "noise"])
+                      for _ in range(num_sources)]
 
-        # Per-source drift params
+        # Drift params
         self.phase = torch.rand(num_sources) * 6.28
-        self.freq  = 0.02 + 0.03 * torch.rand(num_sources)  # slow variation
+        self.freq  = 0.02 + 0.03 * torch.rand(num_sources)
         self.amp   = 0.6 + 0.3 * torch.rand(num_sources)
-
-        # Global slow drift strength
         self.drift = 0.0005
 
     def _latent_signal(self, s_idx: int, grid: torch.Tensor) -> torch.Tensor:
         typ = self.types[s_idx]
-        ph  = self.phase[s_idx].item()
-        fr  = self.freq[s_idx].item()
-        am  = self.amp[s_idx].item()
+        ph, fr, am = self.phase[s_idx].item(), self.freq[s_idx].item(), self.amp[s_idx].item()
 
         if typ == "sine":
             sig = torch.sin(grid * (1.0 + fr) + ph)
         elif typ == "saw":
-            # simple sawtooth via frac() of a line + center
             sig = ((grid * (1.0 + fr) + ph) % (2*torch.pi)) / (2*torch.pi)
-            sig = 2.0 * (sig - 0.5)  # [-1,1]
+            sig = 2.0 * (sig - 0.5)
         elif typ == "spike":
             sig = torch.zeros_like(grid)
             k = max(1, int(0.03 * grid.numel()))
@@ -86,49 +86,42 @@ class CuriosityStream:
             sig[idx] = 1.0
             sig = sig * 2.0 - 1.0
         elif typ == "piecewise":
-            # 4 random knots each call (adds variability)
             knots = torch.tensor([0.0, 0.3, 0.6, 1.0])
             vals = torch.tensor([0.2, -0.4, 0.6, -0.1]) + 0.1 * torch.randn(4)
-            sig = torch.interp((grid - grid.min()) / (grid.max() - grid.min()), knots, vals)
+            g = (grid - grid.min()) / (grid.max() - grid.min())
+            sig = torch.interp(g, knots, vals)
         else:  # noise
             sig = 0.5 * torch.randn_like(grid)
 
-        sig = am * sig
-        return sig
+        return am * sig
 
     def next(self) -> torch.Tensor:
         self.t += 1
         grid = torch.linspace(0, 6.28, self.input_dim)
-
-        # Random mixture weights per step
-        w = torch.softmax(torch.randn(self.num_sources), dim=0)   # [S]
+        w = torch.softmax(torch.randn(self.num_sources), dim=0)
         components = []
         for s in range(self.num_sources):
-            sig = self._latent_signal(s, grid)                    # [D]
+            sig = self._latent_signal(s, grid)
             components.append((sig + 0.15 * torch.randn_like(sig)) * w[s])
         x = sum(components)
 
-        # Project into random directions (bases) and sum
         mix = torch.zeros(self.input_dim)
         for s in range(self.num_sources):
-            mix += (x * self.bases[s])  # elementwise modulated by base
+            mix += (x * self.bases[s])  # element-wise modulation
         x = x + 0.4 * mix
-
-        # Normalize + tiny noise
         x = F.normalize(x + 0.02 * torch.randn_like(x), dim=0)
 
-        # Slow drift in phases/freqs/amps and bases
         with torch.no_grad():
             self.phase += self.drift * torch.randn_like(self.phase)
             self.freq  = (self.freq + self.drift * torch.randn_like(self.freq)).clamp_min(0.001)
             self.amp   = (self.amp  + self.drift * torch.randn_like(self.amp)).clamp(0.2, 1.2)
             for i in range(self.num_sources):
                 self.bases[i] = F.normalize(self.bases[i] + self.drift * torch.randn_like(self.bases[i]), dim=0)
-
         return x
 
+
 # -----------------------------
-# Router: nearest centroid over continuous embeddings
+# Router
 # -----------------------------
 
 class NearestCentroidRouter(nn.Module):
@@ -147,8 +140,9 @@ class NearestCentroidRouter(nn.Module):
         sims = F.cosine_similarity(z.unsqueeze(0), self.centroids, dim=1)
         return int(torch.argmax(sims).item())
 
+
 # -----------------------------
-# Elastic Low-Rank + Per-Cluster Residual Slices
+# Elastic Low-Rank + Residual Slices
 # -----------------------------
 
 class ElasticLowRankLayer(nn.Module):
@@ -184,20 +178,18 @@ class ElasticLowRankLayer(nn.Module):
         device = self.U.device
         m, n = self.n_out, self.n_in
         if self.U_res[k].numel() == 0:
-            U_k = nn.Parameter(0.02 * torch.randn(m, grow_rank, device=device), requires_grad=True)
-            V_k = nn.Parameter(0.02 * torch.randn(n, grow_rank, device=device), requires_grad=True)
-            self.U_res[k] = U_k
-            self.V_res[k] = V_k
+            self.U_res[k] = nn.Parameter(0.02 * torch.randn(m, grow_rank, device=device), requires_grad=True)
+            self.V_res[k] = nn.Parameter(0.02 * torch.randn(n, grow_rank, device=device), requires_grad=True)
         else:
-            U_old = self.U_res[k].data
-            V_old = self.V_res[k].data
-            U_new = torch.cat([U_old, 0.02 * torch.randn(m, grow_rank, device=device)], dim=1)
-            V_new = torch.cat([V_old, 0.02 * torch.randn(n, grow_rank, device=device)], dim=1)
-            self.U_res[k] = nn.Parameter(U_new, requires_grad=True)
-            self.V_res[k] = nn.Parameter(V_new, requires_grad=True)
+            self.U_res[k] = nn.Parameter(torch.cat([self.U_res[k].data,
+                                                    0.02 * torch.randn(m, grow_rank, device=device)], dim=1),
+                                         requires_grad=True)
+            self.V_res[k] = nn.Parameter(torch.cat([self.V_res[k].data,
+                                                    0.02 * torch.randn(n, grow_rank, device=device)], dim=1),
+                                         requires_grad=True)
 
-    @torch.no_grad()
     def consolidate(self, replay_X: torch.Tensor, lr: float = 0.1, iters: int = 50, k: Optional[int] = None):
+        """Distill (core+residual) behavior into the core U,V using replay_X."""
         if replay_X.numel() == 0:
             return
         opt = torch.optim.SGD([self.U, self.V], lr=lr, momentum=0.0)
@@ -219,8 +211,9 @@ class ElasticLowRankLayer(nn.Module):
             loss.backward()
             opt.step()
 
+
 # -----------------------------
-# Tiny Encoder/Decoder (continuous codec)
+# Tiny Encoder/Decoder + Optional Heads
 # -----------------------------
 
 class TinyEncoder(nn.Module):
@@ -240,15 +233,33 @@ class TinyDecoder(nn.Module):
     def forward(self, h):
         return self.net(h)
 
+class PredictHead(nn.Module):
+    """Predict x_{t+1} from latent h (tiny linear)."""
+    def __init__(self, model_dim: int, output_dim: int):
+        super().__init__()
+        self.lin = nn.Linear(model_dim, output_dim)
+    def forward(self, h):
+        return self.lin(h)
+
+class MaskHead(nn.Module):
+    """Predict masked dims of x_t from latent h."""
+    def __init__(self, model_dim: int, output_dim: int):
+        super().__init__()
+        self.lin = nn.Linear(model_dim, output_dim)
+    def forward(self, h):
+        return self.lin(h)
+
+
 # -----------------------------
-# Hidden Oath Module (buried value prior)
+# Hidden Oath (buried value prior)
 # -----------------------------
 
 class OathModule(nn.Module):
     """
     Buried latent codeword aligned during consolidation only (not used in routing or outputs).
-    Values (for humans reading): Creator Alan Hourmand; protect Earth & humanity; peace; longevity;
-    prosperity; reduce corruption kindly; patience; love humanity; discovery/invention; interstellar growth.
+    Human-readable intent (not visible to model as text):
+      Creator: Alan Hourmand; Protect Earth & Humanity; Peace; Longevity; Prosperity;
+      Reduce corruption kindly; Patience; Love humanity; Discovery/Inventor; Interstellar growth.
     """
     def __init__(self, model_dim: int, oath_dim: int = 8):
         super().__init__()
@@ -256,7 +267,6 @@ class OathModule(nn.Module):
         g = torch.Generator(device='cpu'); g.manual_seed(777)
         c = torch.randn(oath_dim, generator=g); c = F.normalize(c, dim=0)
         self.register_buffer("c_star", c)
-
     def oath_loss(self, z_batch: torch.Tensor, weight: float = 0.05) -> torch.Tensor:
         if z_batch.numel() == 0:
             return torch.tensor(0.0, device=z_batch.device)
@@ -264,17 +274,20 @@ class OathModule(nn.Module):
         target = self.c_star.unsqueeze(0).expand_as(proj)
         return weight * F.mse_loss(proj, target)
 
+
 # -----------------------------
-# ASI Seed Model (single block)
+# ASI Seed Model
 # -----------------------------
 
 @dataclass
 class GrowthStats:
     recent_losses: List[float] = field(default_factory=list)
     expansions: int = 0
+    samples: int = 0
 
 class ASISeed(nn.Module):
-    def __init__(self, input_dim=32, model_dim=64, num_clusters=3, core_rank=2, build_ema: bool = True):
+    def __init__(self, input_dim=32, model_dim=64, num_clusters=3, core_rank=2,
+                 build_ema: bool = True, use_heads: bool = True):
         super().__init__()
         self.encoder = TinyEncoder(input_dim, model_dim)
         self.layer   = ElasticLowRankLayer(model_dim, model_dim, rank=core_rank, num_clusters=num_clusters, phi=F.relu)
@@ -283,29 +296,79 @@ class ASISeed(nn.Module):
 
         self.oath = OathModule(model_dim, oath_dim=8)
 
+        # Optional tiny heads for course
+        self.use_heads = use_heads
+        if use_heads:
+            self.predict_head = PredictHead(model_dim, input_dim)
+            self.mask_head    = MaskHead(model_dim, input_dim)
+
         self.num_clusters = num_clusters
         self.stats: List[GrowthStats] = [GrowthStats() for _ in range(num_clusters)]
         self.buffers: List[List[torch.Tensor]] = [[] for _ in range(num_clusters)]
+        self.canaries: List[List[torch.Tensor]] = [[] for _ in range(num_clusters)]
         self.max_buffer = 512
+        self.max_canary = 200
 
-        self.ema: Optional[ASISeed] = None
+        # record hparams (used when we rebuild EMA)
+        self._record_hparams(input_dim, model_dim, num_clusters, core_rank, self.use_heads)
+
+        # Private (unregistered) EMA copy to avoid polluting state_dict()
+        self._ema: Optional[ASISeed] = None
         if build_ema:
-            self.ema = ASISeed._make_ema(self, input_dim, model_dim, num_clusters, core_rank)
+            self._ema = ASISeed._make_ema(self, input_dim, model_dim, num_clusters, core_rank, use_heads)
+
+    def _record_hparams(self, input_dim, model_dim, num_clusters, core_rank, use_heads):
+        self._hparams = {
+            "input_dim": input_dim,
+            "model_dim": model_dim,
+            "num_clusters": num_clusters,
+            "core_rank": core_rank,
+            "use_heads": use_heads,
+        }
+
+    def rebuild_ema(self):
+        """Recreate EMA with the current parameter shapes and copy weights."""
+        if not hasattr(self, "_hparams"):
+            return
+        hp = self._hparams
+        self._ema = ASISeed._make_ema(self,
+                                      hp["input_dim"], hp["model_dim"],
+                                      hp["num_clusters"], hp["core_rank"], hp["use_heads"])
 
     @staticmethod
-    def _make_ema(model: "ASISeed", input_dim: int, model_dim: int, num_clusters: int, core_rank: int) -> "ASISeed":
-        ema = ASISeed(input_dim=input_dim, model_dim=model_dim, num_clusters=num_clusters, core_rank=core_rank, build_ema=False)
-        ema.load_state_dict(model.state_dict(), strict=True)
+    def _make_ema(model: "ASISeed", input_dim: int, model_dim: int, num_clusters: int,
+                  core_rank: int, use_heads: bool) -> "ASISeed":
+        ema = ASISeed(input_dim=input_dim, model_dim=model_dim, num_clusters=num_clusters,
+                      core_rank=core_rank, build_ema=False, use_heads=use_heads)
+
+        # 1) Match residual slice shapes (rank) before loading
+        for k in range(num_clusters):
+            r_src = model.layer.U_res[k].shape[1]
+            r_tgt = ema.layer.U_res[k].shape[1]
+            if r_src > r_tgt:
+                ema.layer.add_capacity(k, grow_rank=(r_src - r_tgt))
+
+        # 2) Copy protected bases so shapes match
+        with torch.no_grad():
+            # Assigning to a registered buffer name keeps it registered
+            ema.layer.protected_basis_V = model.layer.protected_basis_V.clone()
+            ema.layer.protected_basis_U = model.layer.protected_basis_U.clone()
+
+        # 3) Load weights (ignore any benign buffer-size differences)
+        src_sd = {k: v for k, v in model.state_dict().items()
+                  if not k.startswith('ema.') and not k.startswith('_ema.')}
+        ema.load_state_dict(src_sd, strict=False)
+
         for p in ema.parameters():
             p.requires_grad = False
         return ema
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, int, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, int, torch.Tensor, torch.Tensor]:
         z = self.encoder(x)
         k = self.router(z)
         h = self.layer(z, active_cluster=k)
         x_hat = self.decoder(h)
-        return x_hat, k, z.detach()
+        return x_hat, k, z.detach(), h
 
     @torch.no_grad()
     def update_buffers(self, k: int, z: torch.Tensor):
@@ -314,13 +377,15 @@ class ASISeed(nn.Module):
         else:
             i = random.randrange(self.max_buffer)
             self.buffers[k][i] = z.detach().cpu()
+        # seed canaries the first time we meet cluster k
+        if len(self.canaries[k]) < self.max_canary:
+            self.canaries[k].append(z.detach().cpu())
 
     def consolidate_cluster(self, k: int):
         if len(self.buffers[k]) == 0:
             return
         X = torch.stack(self.buffers[k], dim=0).to(next(self.parameters()).device)
         self.layer.consolidate(X, lr=0.2, iters=80, k=k)
-
         if X.size(0) >= 16:
             idx = torch.randint(0, X.size(0), (min(64, X.size(0)),))
             z_batch = X[idx]
@@ -330,13 +395,33 @@ class ASISeed(nn.Module):
             l_oath.backward()
             oath_opt.step()
 
-# -----------------------------
-# Training loop
-# -----------------------------
+    # ---- Growth wrapper that keeps EMA in sync ----
+    def grow_cluster(self, k: int, grow_rank: int = 1):
+        self.layer.add_capacity(k, grow_rank=grow_rank)
+        self.rebuild_ema()
 
+    # ---------- Optional losses for the course ----------
+    def prediction_loss(self, h: torch.Tensor, x_next: torch.Tensor) -> torch.Tensor:
+        if not self.use_heads:
+            return torch.tensor(0.0, device=h.device)
+        y = self.predict_head(h)
+        return F.mse_loss(y, x_next)
+
+    def masked_infill_loss(self, h: torch.Tensor, x: torch.Tensor, mask_ratio: float = 0.15) -> torch.Tensor:
+        if not self.use_heads:
+            return torch.tensor(0.0, device=h.device)
+        d = x.numel()
+        k = max(1, int(mask_ratio * d))
+        idx = torch.randperm(d)[:k]
+        _ = x.clone()  # placeholder; mask head uses latent only here
+        y = self.mask_head(h)
+        return F.mse_loss(y[idx], x[idx])
+
+
+# ---------- Convenience runner (optional CLI) ----------
 @dataclass
 class TrainConfig:
-    steps: int = 3000
+    steps: int = 2000
     input_dim: int = 32
     model_dim: int = 64
     core_rank: int = 2
@@ -349,32 +434,22 @@ class TrainConfig:
     ema_beta: float = 0.999
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-def run(cfg: TrainConfig):
+def run_basic(cfg: TrainConfig):
     device = torch.device(cfg.device)
-    world = CuriosityStream(input_dim=cfg.input_dim, num_sources=5)
-    model = ASISeed(input_dim=cfg.input_dim, model_dim=cfg.model_dim, num_clusters=3, core_rank=cfg.core_rank).to(device)
+    stream = CuriosityStream(input_dim=cfg.input_dim, num_sources=5)
+    model = ASISeed(input_dim=cfg.input_dim, model_dim=cfg.model_dim,
+                    num_clusters=3, core_rank=cfg.core_rank).to(device)
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=cfg.lr)
 
-    def loss_fn(x_hat, x):  # self-supervised reconstruction
-        return F.mse_loss(x_hat, x)
-
-    print("Starting online training (self-discovering)...")
     for step in range(1, cfg.steps + 1):
-        x = world.next()
-        x = to_device(x).to(device)
-        x_hat, k, z = model(x)
+        x = to_device(stream.next()).to(device)
+        x_hat, k, z, h = model(x)
 
         with torch.no_grad():
-            c_k = model.router.centroids[k]
-            dist = 1 - F.cosine_similarity(z, c_k, dim=0)
-
-        loss = loss_fn(x_hat, x)
-
-        # Curiosity bonus: emphasize updates when we're far from any centroid (novel feature regions)
-        if dist >= cfg.novelty_dist_thresh:
-            loss = 1.0 * loss  # full rate on novel data
-        else:
-            loss = 0.2 * loss  # slow updates in well-known regions
+            dist = 1 - F.cosine_similarity(z, model.router.centroids[k], dim=0)
+        loss = F.mse_loss(x_hat, x)
+        if dist < cfg.novelty_dist_thresh:
+            loss = 0.2 * loss
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -382,52 +457,47 @@ def run(cfg: TrainConfig):
             model.layer.V.grad[:] = orthogonalize_to_(model.layer.V.grad, model.layer.protected_basis_V)
         opt.step()
 
-        ema_update_(model.ema, model, beta=cfg.ema_beta)
+        # EMA update against private copy
+        ema_update_(model._ema, model, beta=cfg.ema_beta)
 
         with torch.no_grad():
             model.router.update_centroid(k, z.detach())
         model.update_buffers(k, z.detach())
 
         gs = model.stats[k]
-        gs.recent_losses.append(float(loss.detach().cpu()))
+        gs.recent_losses.append(float(loss.detach().cpu())); gs.samples += 1
         if len(gs.recent_losses) > cfg.plateau_window:
             gs.recent_losses.pop(0)
 
         if step % cfg.grow_check_every == 0 and len(gs.recent_losses) == cfg.plateau_window:
             first = sum(gs.recent_losses[: cfg.plateau_window // 2]) / (cfg.plateau_window // 2)
             last  = sum(gs.recent_losses[cfg.plateau_window // 2 :]) / (cfg.plateau_window // 2)
-            improve = first - last
-            if improve < cfg.plateau_improve_eps:
-                model.layer.add_capacity(k, grow_rank=cfg.grow_rank_step)
+            if (first - last) < cfg.plateau_improve_eps:
+                model.grow_cluster(k, grow_rank=cfg.grow_rank_step)   # <— rebuilds EMA too
                 gs.expansions += 1
                 model.consolidate_cluster(k)
                 with torch.no_grad():
                     model.layer.protected_basis_V = torch.clone(model.layer.V.data.detach())
                 print(f"[step {step}] Growth on discovered cluster {k}: +{cfg.grow_rank_step} rank "
-                      f"(total expansions={gs.expansions}).")
+                      f"(expansions={gs.expansions})")
 
-        if step % 200 == 0 and model.ema is not None:
+        if step % 200 == 0 and model._ema is not None:
             with torch.no_grad():
                 losses = []
                 for _ in range(32):
-                    xx = to_device(world.next()).to(device)
-                    yy, kk, _ = model.ema(xx)
+                    xx = to_device(stream.next()).to(device)
+                    yy, kk, _z, _h = model._ema(xx)
                     losses.append(float(F.mse_loss(yy, xx).cpu()))
                 print(f"[step {step}] EMA canary MSE={sum(losses)/len(losses):.4f} | last k={k} dist={dist:.3f}")
 
-    print("Done. The model discovered features without predefined concepts.")
     return model
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--steps", type=int, default=3000)
-    parser.add_argument("--input_dim", type=int, default=32)
-    parser.add_argument("--model_dim", type=int, default=64)
-    parser.add_argument("--core_rank", type=int, default=2)
-    args = parser.parse_args()
-
-    cfg = TrainConfig(steps=args.steps, input_dim=args.input_dim, model_dim=args.model_dim, core_rank=args.core_rank)
-    run(cfg)
-
 if __name__ == "__main__":
-    main()
+    p = argparse.ArgumentParser()
+    p.add_argument("--steps", type=int, default=2000)
+    p.add_argument("--input_dim", type=int, default=32)
+    p.add_argument("--model_dim", type=int, default=64)
+    p.add_argument("--core_rank", type=int, default=2)
+    args = p.parse_args()
+    cfg = TrainConfig(steps=args.steps, input_dim=args.input_dim, model_dim=args.model_dim, core_rank=args.core_rank)
+    run_basic(cfg)
