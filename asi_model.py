@@ -81,7 +81,7 @@ class CuriosityStream:
         if typ == "sine":
             sig = torch.sin(grid * (1.0 + fr) + ph)
         elif typ == "saw":
-            sig = ((grid * (1.0 + fr) + ph) % (2*torch.pi)) / (2*torch.pi)
+            sig = ((grid * (1.0 + fr) + ph) % (2 * torch.pi)) / (2 * torch.pi)
             sig = 2.0 * (sig - 0.5)
         elif typ == "spike":
             sig = torch.zeros_like(grid)
@@ -93,7 +93,13 @@ class CuriosityStream:
             knots = torch.tensor([0.0, 0.3, 0.6, 1.0])
             vals = torch.tensor([0.2, -0.4, 0.6, -0.1]) + 0.1 * torch.randn(4)
             g = (grid - grid.min()) / (grid.max() - grid.min())
-            sig = torch.interp(g, knots, vals)
+            # Fixed: Use numpy interp for compatibility
+            import numpy as np
+            g_np = g.cpu().numpy()
+            knots_np = knots.cpu().numpy()
+            vals_np = vals.cpu().numpy()
+            sig_np = np.interp(g_np, knots_np, vals_np)
+            sig = torch.from_numpy(sig_np).float()
         else:  # noise
             sig = 0.5 * torch.randn_like(grid)
 
