@@ -31,8 +31,8 @@ class VideoLearningTest:
         # Initialize model
         # Video frames: 64x64x3 = 12,288 dims → Too large!
         # Use smaller encoding
-        self.frame_size = 32  # Downscale to 32x32 for speed
-        self.input_dim = self.frame_size * self.frame_size  # 1024 (grayscale)
+        self.frame_size = 32
+        self.input_dim = self.frame_size * self.frame_size * 3  # 32x32x3 = 3072 (RGB)
 
         self.model = ASISeed(
             input_dim=self.input_dim,
@@ -77,7 +77,7 @@ class VideoLearningTest:
         return torch.from_numpy(normalized.flatten())
 
     def train_on_video(self, video_info, max_frames=100, show_progress=False):
-        """Train on a single video"""
+        """Train on a single video (RGB)"""
         video_path = os.path.join(self.video_dir, video_info['filename'])
 
         if not os.path.exists(video_path):
@@ -98,9 +98,9 @@ class VideoLearningTest:
             if not ret:
                 break
 
-            # Process frame
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            small = cv2.resize(gray, (self.frame_size, self.frame_size))
+            # --- RGB, downscale, normalize ---
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            small = cv2.resize(rgb, (self.frame_size, self.frame_size))
             normalized = small.astype(np.float32) / 255.0
             x = torch.from_numpy(normalized.flatten()).to(self.device)
 
@@ -113,37 +113,39 @@ class VideoLearningTest:
             loss.backward()
             self.opt.step()
 
-            # Update router
+            # Update router/buffers
+            k_idx = int(k.item()) if isinstance(k, torch.Tensor) else int(k)
             with torch.no_grad():
-                self.model.router.update_centroid(k, z)
-            self.model.update_buffers(k, z)
+                self.model.router.update_centroid(k_idx, z)
+            self.model.update_buffers(k_idx, z)
 
             losses.append(loss.item())
-            clusters_used.append(k)
-            self.results['cluster_usage'][k] += 1
+            clusters_used.append(k_idx)
+            self.results['cluster_usage'][k_idx] += 1
 
         cap.release()
 
         # Check for growth
-        for k in set(clusters_used):
-            stats = self.model.stats[k]
+        for k_idx in set(clusters_used):
+            stats = self.model.stats[k_idx]
             if len(stats.recent_losses) >= 20:
                 recent_avg = sum(stats.recent_losses) / len(stats.recent_losses)
-                if recent_avg > 0.02 and stats.samples > 100:
-                    old_rank = self.model.layer.U_res[k].shape[1] if self.model.layer.U_res[k].numel() > 0 else 0
-                    self.model.grow_cluster(k, grow_rank=1)
-                    new_rank = self.model.layer.U_res[k].shape[1]
+                if recent_avg > 0.02 and stats.samples > 30:
+                    old_rank = self.model.layer.U_res[k_idx].shape[1] if self.model.layer.U_res[
+                                                                             k_idx].numel() > 0 else 0
+                    self.model.grow_cluster(k_idx, grow_rank=1)
+                    new_rank = self.model.layer.U_res[k_idx].shape[1]
 
                     event = {
                         'video': video_info['filename'],
-                        'cluster': k,
+                        'cluster': k_idx,
                         'old_rank': old_rank,
                         'new_rank': new_rank
                     }
                     self.results['growth_events'].append(event)
 
                     if show_progress:
-                        print(f"    🌱 Growth: Cluster {k} expanded to rank {new_rank}")
+                        print(f"    🌱 Growth: Cluster {k_idx} expanded to rank {new_rank}")
 
         avg_loss = sum(losses) / len(losses) if losses else 1.0
 
@@ -153,11 +155,11 @@ class VideoLearningTest:
             'initial_loss': losses[0] if losses else 1.0,
             'final_loss': losses[-1] if losses else 1.0,
             'clusters': list(set(clusters_used)),
-            'primary_cluster': max(set(clusters_used), key=clusters_used.count)
+            'primary_cluster': max(set(clusters_used), key=clusters_used.count) if clusters_used else -1
         }
 
     def test_on_video(self, video_info, max_frames=100):
-        """Test on a single video (no training)"""
+        """Test on a single video (RGB, no training)"""
         video_path = os.path.join(self.video_dir, video_info['filename'])
 
         if not os.path.exists(video_path):
@@ -179,8 +181,9 @@ class VideoLearningTest:
                 if not ret:
                     break
 
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                small = cv2.resize(gray, (self.frame_size, self.frame_size))
+                # --- RGB, downscale, normalize ---
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                small = cv2.resize(rgb, (self.frame_size, self.frame_size))
                 normalized = small.astype(np.float32) / 255.0
                 x = torch.from_numpy(normalized.flatten()).to(self.device)
 
@@ -188,7 +191,8 @@ class VideoLearningTest:
                 loss = F.mse_loss(x_hat, x)
 
                 losses.append(loss.item())
-                clusters_used.append(k)
+                k_idx = int(k.item()) if isinstance(k, torch.Tensor) else int(k)
+                clusters_used.append(k_idx)
 
         cap.release()
         self.model.train()
@@ -376,19 +380,19 @@ RESULTS ANALYSIS
 ======================================================================
 
 📊 Training Performance:
-  Average final loss: 0.0264
+  Average final loss: 0.0377
   Videos trained: 80
 
 🌱 Growth Events: 0
 
 🎯 Cluster Usage:
-  Cluster 3: 2719 activations
-  Cluster 5: 1 activations
+  Cluster 8: 1 activations
+  Cluster 9: 2719 activations
 
 🧪 Test Performance (Novel Combinations):
-  Average loss: 0.0360
+  Average loss: 0.0598
   Videos tested: 20
-  Train-Test gap: +0.0096
+  Train-Test gap: +0.0221
   ✓ EXCELLENT: Strong generalization to novel combinations!
 
 ======================================================================
