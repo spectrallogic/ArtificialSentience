@@ -1,8 +1,8 @@
 # asi_testing/temporal_webcam_learning_viz.py
 # Webcam temporal learning with subconscious bias + EMA teacher (+1 step distillation)
-# - Student learns every frame via teacher distillation on +1
-# - Long-horizon (+30) rendered closed-loop with episodic anchoring (viz only)
-# - No in-place ops in the autograd graph (fixes the earlier runtime error)
+# + light multi-horizon teacher distill (k in {6, 30}) to reduce fade-to-grey
+# + episodic anchoring for viz (knn h-anchors)
+# + decoder on sigmoid bounds [0,1] and variance-preserver to avoid saturation
 
 import os, sys, time, math
 from collections import defaultdict, deque
@@ -15,8 +15,8 @@ from asi_model import ASISeed, ema_update_
 # -------------------- Config --------------------
 HQ_SIZE          = 96
 INPUT_DIM        = HQ_SIZE * HQ_SIZE * 3
-MODEL_DIM        = 128
-NUM_CLUSTERS     = 16
+MODEL_DIM        = 192          # bumped for capacity
+NUM_CLUSTERS     = 24           # more routing diversity
 DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Optimizer (decoder a bit slower to reduce saturation)
@@ -35,11 +35,16 @@ P1_PIX_T_W       = 0.35   # student x̂_{t+1} vs teacher x̂_{t+1}
 P1_LAT_T_W       = 0.30   # student h_{t+1} vs teacher h_{t+1}
 SUBC_ALIGN_W     = 0.25   # align student subconscious bias to teacher Δh
 
+# Add light multi-horizon teacher supervision (every N frames)
+MULTI_T_STEPS    = [6, 30]
+MULTI_T_EVERY    = 8
+MULTI_T_W        = 0.15    # pooled pixel MSE weight for long horizons
+
 # Base losses
 RECON_W          = 1.0
 ENT_W_EARLY      = 1e-3
 ENT_EARLY_FRAC   = 0.4
-VAR_W            = 0.15   # variance preserver on student +1 pixels
+VAR_W            = 0.15     # variance preserver on student +1 pixels
 
 # Long-horizon visualization (no training grads from these)
 FAR_H            = 30
@@ -110,7 +115,6 @@ def cos_loss(a, b, eps=1e-8):
     return 1.0 - F.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0), dim=1).clamp(-1+eps, 1-eps).mean()
 
 def variance_preserver(x_pred, min_std=0.06):
-    # no in-place ops here; return a scalar
     x = x_pred.view(1, -1)
     std = x.std(dim=1, unbiased=False)
     short = torch.clamp(min_std - std, min=0.0)
@@ -170,7 +174,7 @@ def rollout_closed_loop(model: ASISeed, h0, z0, k_route, mem: EpisodicMem, steps
 # -------------------- Main --------------------
 def main():
     model = ASISeed(input_dim=INPUT_DIM, model_dim=MODEL_DIM,
-                    num_clusters=NUM_CLUSTERS, core_rank=4,
+                    num_clusters=NUM_CLUSTERS, core_rank=6,
                     build_ema=False, use_heads=True).to(DEVICE)
 
     # Two-group optimizer (use id() to avoid tensor-equality pitfalls)
@@ -204,7 +208,7 @@ def main():
         arr = np.stack(pre, axis=0)
         stream_stats = (float(arr.mean()), float(arr.std() + 1e-8))
 
-    mem = EpisodicMem(cap=320)
+    mem = EpisodicMem(cap=480)
 
     total_steps = 0
     fps_ema, t_prev = None, time.time()
@@ -212,7 +216,7 @@ def main():
     far_frames, far_targets = [], []
     far_idx = 0
 
-    print("▶ Webcam Subconscious Demo (teacher +1 distillation) — [q quit, s snapshot]")
+    print("▶ Webcam Subconscious Demo (teacher +1 distill + light multi-horizon) — [q quit, s snapshot]")
     while True:
         ok, frame = cap.read()
         if not ok: break
@@ -238,10 +242,33 @@ def main():
             h_pred1_T = teacher.temporal.step(z_t.detach(), h_t.detach(), bias=s_T)
             x_pred1_T = teacher.decoder(h_pred1_T)
 
-        # -------- Losses (ALL are out-of-place ops; no in-place on graph tensors) --------
-        recon_loss   = F.mse_loss(x_hat_t, x_t)
-        p1_pix_T_loss= pooled_mse(x_pred1_S, x_pred1_T, size=HQ_SIZE, pool=TEACHER_POOL)
-        p1_lat_T_loss= cos_loss(h_pred1_S, h_pred1_T)
+        # Optional teacher multi-horizon supervision every N steps
+        multi_t_loss = torch.tensor(0.0, device=DEVICE)
+        if (total_steps % MULTI_T_EVERY) == 0:
+            mh_losses = []
+            with torch.no_grad():
+                hT = h_t.detach()
+                for k in MULTI_T_STEPS:
+                    # teacher roll with bias each step
+                    hT_local = hT.clone()
+                    for _ in range(k):
+                        sTb, _ = teacher.subconscious_bias(z_t.detach(), hT_local, k_t)
+                        hT_local = teacher.temporal.step(z_t.detach(), hT_local, bias=sTb)
+                    xT_k = teacher.decoder(hT_local)
+                    # student roll (keep graph) with its bias
+                    hS_local = h_t
+                    for _ in range(k):
+                        sSb, _ = model.subconscious_bias(z_t, hS_local, k_t)
+                        hS_local = model.temporal.step(z_t, hS_local, bias=sSb)
+                    xS_k = model.decoder(hS_local)
+                    mh_losses.append(pooled_mse(xS_k, xT_k, size=HQ_SIZE, pool=2))
+            if mh_losses:
+                multi_t_loss = torch.stack(mh_losses).mean()
+
+        # -------- Losses --------
+        recon_loss    = F.mse_loss(x_hat_t, x_t)
+        p1_pix_T_loss = pooled_mse(x_pred1_S, x_pred1_T, size=HQ_SIZE, pool=TEACHER_POOL)
+        p1_lat_T_loss = cos_loss(h_pred1_S, h_pred1_T)
 
         # Align subconscious direction to teacher delta-h
         delta_T = (h_pred1_T - h_t).detach()
@@ -263,6 +290,7 @@ def main():
             P1_LAT_T_W   * p1_lat_T_loss +
             SUBC_ALIGN_W * subc_align +
             VAR_W        * var_loss +
+            MULTI_T_W    * multi_t_loss +
             ent_w        * entropy
         )
 
@@ -340,7 +368,7 @@ def main():
         )
         cv2.putText(
             hud,
-            f"subcAlign={subc_align.item():.4f}  var={var_loss.item():.4f}",
+            f"subcAlign={subc_align.item():.4f}  var={var_loss.item():.4f}  multiT={multi_t_loss.item():.4f}",
             (12, hud_y + 24), FONT, HUD_FONT_SCALE, (200, 255, 200), HUD_THICKNESS, cv2.LINE_AA
         )
         # FPS
@@ -352,7 +380,7 @@ def main():
         cv2.putText(hud, f"FPS~{fps_ema:.1f}", (12, hud_y + 48), FONT, HUD_FONT_SCALE, (0, 200, 255), HUD_THICKNESS, cv2.LINE_AA)
 
         panel = np.concatenate([left, hud], axis=1)
-        title = "ArtificialSentience | Webcam Subconscious Demo (teacher +1 distill)  [q quit, s snap]"
+        title = "ArtificialSentience | Webcam Subconscious Demo (+1 distill + multi-horizon)  [q quit, s snap]"
         cv2.imshow(title, panel)
 
         key = cv2.waitKey(1) & 0xFF

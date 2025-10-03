@@ -223,8 +223,11 @@ class ElasticLowRankLayer(nn.Module):
 class TinyEncoder(nn.Module):
     def __init__(self, input_dim: int, model_dim: int):
         super().__init__()
+        # widened for capacity (helps with “smaller model” concern)
         self.net = nn.Sequential(
-            nn.Linear(input_dim, model_dim),
+            nn.Linear(input_dim, model_dim * 2),
+            nn.Tanh(),
+            nn.Linear(model_dim * 2, model_dim),
             nn.Tanh(),
         )
     def forward(self, x):
@@ -233,16 +236,24 @@ class TinyEncoder(nn.Module):
 class TinyDecoder(nn.Module):
     def __init__(self, model_dim: int, output_dim: int):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(model_dim, output_dim))
+        self.net = nn.Sequential(
+            nn.Linear(model_dim, model_dim * 2),
+            nn.Tanh(),
+            nn.Linear(model_dim * 2, output_dim),
+        )
     def forward(self, h):
         # constrain to [0,1] like a bounded pixel prediction
         return torch.sigmoid(self.net(h))
 
 class PredictHead(nn.Module):
-    """Predict x_{t+1} from latent h (tiny linear)."""
+    """Predict x_{t+1} from latent h (tiny MLP)."""
     def __init__(self, model_dim: int, output_dim: int):
         super().__init__()
-        self.lin = nn.Linear(model_dim, output_dim)
+        self.lin = nn.Sequential(
+            nn.Linear(model_dim, model_dim),
+            nn.Tanh(),
+            nn.Linear(model_dim, output_dim),
+        )
     def forward(self, h):
         return torch.sigmoid(self.lin(h))
 
@@ -250,7 +261,11 @@ class MaskHead(nn.Module):
     """Predict masked dims of x_t from latent h."""
     def __init__(self, model_dim: int, output_dim: int):
         super().__init__()
-        self.lin = nn.Linear(model_dim, output_dim)
+        self.lin = nn.Sequential(
+            nn.Linear(model_dim, model_dim),
+            nn.Tanh(),
+            nn.Linear(model_dim, output_dim),
+        )
     def forward(self, h):
         return torch.sigmoid(self.lin(h))
 
@@ -281,7 +296,7 @@ class OathModule(nn.Module):
 
 
 # -----------------------------
-# NEW: SubconsciousCore (Stage B)
+# SubconsciousCore
 # -----------------------------
 
 class SubconsciousCore(nn.Module):
@@ -365,7 +380,7 @@ class SubconsciousCore(nn.Module):
 
 
 # -----------------------------
-# NEW: TemporalCore (Stage A/B)
+# TemporalCore
 # -----------------------------
 
 class TemporalCore(nn.Module):
@@ -472,7 +487,7 @@ class GrowthStats:
     samples: int = 0
 
 class ASISeed(nn.Module):
-    def __init__(self, input_dim=32, model_dim=64, num_clusters=3, core_rank=2,
+    def __init__(self, input_dim=32, model_dim=192, num_clusters=24, core_rank=4,
                  build_ema: bool = True, use_heads: bool = True):
         super().__init__()
         self.encoder = TinyEncoder(input_dim, model_dim)
@@ -489,7 +504,7 @@ class ASISeed(nn.Module):
             self.predict_head = PredictHead(model_dim, input_dim)
             self.mask_head    = MaskHead(model_dim, input_dim)
 
-        # NEW: temporal core
+        # temporal core
         self.temporal = TemporalCore(model_dim=model_dim)
 
         self.num_clusters = num_clusters
@@ -497,8 +512,8 @@ class ASISeed(nn.Module):
         # Replay buffers store z (encoder space) per cluster
         self.buffers: List[List[torch.Tensor]] = [[] for _ in range(num_clusters)]
         self.canaries: List[List[torch.Tensor]] = [[] for _ in range(num_clusters)]
-        self.max_buffer = 512
-        self.max_canary = 200
+        self.max_buffer = 1024
+        self.max_canary = 256
 
         # record hparams (used when we rebuild EMA)
         self._record_hparams(input_dim, model_dim, num_clusters, core_rank, self.use_heads)
@@ -573,7 +588,7 @@ class ASISeed(nn.Module):
         mem_bank = self._mem_bank_for(k, z.device)
         return self.subconscious(z, h, mem_bank)  # (s_t, info)
 
-    # ----- NEW helpers for temporal-aware training/visualization -----
+    # ----- temporal-aware helpers -----
     def temporal_step(self, z: torch.Tensor, h: torch.Tensor, k: int,
                       s_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
@@ -646,8 +661,8 @@ class ASISeed(nn.Module):
 class TrainConfig:
     steps: int = 2000
     input_dim: int = 32
-    model_dim: int = 64
-    core_rank: int = 2
+    model_dim: int = 192
+    core_rank: int = 4
     lr: float = 1e-3
     grow_check_every: int = 100
     grow_rank_step: int = 1
@@ -661,7 +676,7 @@ def run_basic(cfg: TrainConfig):
     device = torch.device(cfg.device)
     stream = CuriosityStream(input_dim=cfg.input_dim, num_sources=5)
     model = ASISeed(input_dim=cfg.input_dim, model_dim=cfg.model_dim,
-                    num_clusters=3, core_rank=cfg.core_rank).to(device)
+                    num_clusters=6, core_rank=cfg.core_rank).to(device)
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=cfg.lr)
 
     viz = None
@@ -735,8 +750,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--input_dim", type=int, default=32)
-    p.add_argument("--model_dim", type=int, default=64)
-    p.add_argument("--core_rank", type=int, default=2)
+    p.add_argument("--model_dim", type=int, default=192)
+    p.add_argument("--core_rank", type=int, default=4)
     args = p.parse_args()
     cfg = TrainConfig(steps=args.steps, input_dim=args.input_dim, model_dim=args.model_dim, core_rank=args.core_rank)
     run_basic(cfg)
