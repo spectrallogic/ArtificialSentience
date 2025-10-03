@@ -48,8 +48,15 @@ GROW_USAGE_MIN = 350
 GROW_P95_GAP   = 0.02
 
 # Display params
-WIN_W = 1200                          # overall window width
+WIN_W = 1200
 FONT  = cv2.FONT_HERSHEY_SIMPLEX
+
+# NEW: HUD sizing
+LABEL_FONT_SCALE = 0.45
+LABEL_THICKNESS  = 1
+HUD_FONT_SCALE   = 0.48
+HUD_THICKNESS    = 1
+
 
 # -----------------------------
 # Utils

@@ -1,13 +1,7 @@
 # asi_model.py
 # ASI Seed (self-discovering): Always-Training, Non-Uniformly Expanding Low-Rank Model
-# Core properties:
-# - Streaming, token-free vectors
-# - Non-uniform growth by cluster
-# - Consolidation -> abstract baseline
-# - EMA serving (recursion-safe; rebuild on growth)
-# - Hidden Oath codeword (dormant, consolidations only)
-# - Optional tiny heads for course tests (prediction, masked infill)
-# - Realtime 3D GUI (pyqtgraph) for latent space
+# + TemporalCore: multi-timescale traces + stable residual GRU for sequence flow
+# + SubconsciousCore: memory- & noise-driven "urge" that softly biases temporal evolution
 
 import argparse
 import random
@@ -15,7 +9,11 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 import numpy as np
 
-from asi_viz_rt import RealtimeViz  # realtime 3D viewer
+# If you use the realtime viz, keep this import. Otherwise it’s harmless to leave.
+try:
+    from asi_viz_rt import RealtimeViz  # realtime 3D viewer
+except Exception:
+    RealtimeViz = None
 
 import torch
 import torch.nn as nn
@@ -93,11 +91,7 @@ class CuriosityStream:
             knots = torch.tensor([0.0, 0.3, 0.6, 1.0])
             vals = torch.tensor([0.2, -0.4, 0.6, -0.1]) + 0.1 * torch.randn(4)
             g = (grid - grid.min()) / (grid.max() - grid.min())
-            # Fixed: Use numpy interp for compatibility
-            import numpy as np
-            g_np = g.cpu().numpy()
-            knots_np = knots.cpu().numpy()
-            vals_np = vals.cpu().numpy()
+            g_np = g.cpu().numpy(); knots_np = knots.cpu().numpy(); vals_np = vals.cpu().numpy()
             sig_np = np.interp(g_np, knots_np, vals_np)
             sig = torch.from_numpy(sig_np).float()
         else:  # noise
@@ -241,7 +235,8 @@ class TinyDecoder(nn.Module):
         super().__init__()
         self.net = nn.Sequential(nn.Linear(model_dim, output_dim))
     def forward(self, h):
-        return self.net(h)
+        # constrain to [0,1] like a bounded pixel prediction
+        return torch.sigmoid(self.net(h))
 
 class PredictHead(nn.Module):
     """Predict x_{t+1} from latent h (tiny linear)."""
@@ -249,7 +244,7 @@ class PredictHead(nn.Module):
         super().__init__()
         self.lin = nn.Linear(model_dim, output_dim)
     def forward(self, h):
-        return self.lin(h)
+        return torch.sigmoid(self.lin(h))
 
 class MaskHead(nn.Module):
     """Predict masked dims of x_t from latent h."""
@@ -257,7 +252,7 @@ class MaskHead(nn.Module):
         super().__init__()
         self.lin = nn.Linear(model_dim, output_dim)
     def forward(self, h):
-        return self.lin(h)
+        return torch.sigmoid(self.lin(h))
 
 
 # -----------------------------
@@ -286,6 +281,187 @@ class OathModule(nn.Module):
 
 
 # -----------------------------
+# NEW: SubconsciousCore (Stage B)
+# -----------------------------
+
+class SubconsciousCore(nn.Module):
+    """
+    Produces a 'bias' vector s_t in latent space that softly steers temporal evolution.
+    Ingredients:
+      - memory prototypes (top-k similar past z's)
+      - 'dreamlets' (noisy variations)
+      - attention over candidates conditioned on [z_t, h_t]
+    Output: s_t in R^{model_dim}. Magnitude is controlled by a learned gate.
+    """
+    def __init__(self, model_dim: int, k_mem: int = 8, n_dreams: int = 4):
+        super().__init__()
+        self.k_mem = k_mem
+        self.n_dreams = n_dreams
+        self.query = nn.Sequential(
+            nn.Linear(model_dim * 2, model_dim),
+            nn.Tanh(),
+        )
+        self.cand_proj = nn.Linear(model_dim, model_dim)
+        self.score = nn.Linear(model_dim, 1)
+        self.mix = nn.Sequential(
+            nn.Linear(model_dim, model_dim),
+            nn.Tanh(),
+        )
+        self.gate = nn.Sequential(
+            nn.Linear(model_dim * 2, model_dim),
+            nn.Tanh(),
+            nn.Linear(model_dim, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, z_t: torch.Tensor, h_t: torch.Tensor, mem_bank: Optional[torch.Tensor]) -> Tuple[torch.Tensor, dict]:
+        """
+        z_t: (D,) encoder latent of current frame
+        h_t: (D,) current hidden after low-rank layer
+        mem_bank: (N,D) past z's for the active cluster (may be None or empty)
+        returns: (s_t, info) where s_t in R^D
+        """
+        D = z_t.numel()
+        device = z_t.device
+
+        # Build candidates: memory prototypes + dreamlets
+        cands = []
+
+        if mem_bank is not None and mem_bank.numel() > 0:
+            Z = F.normalize(mem_bank.to(device), dim=1)  # (N,D)
+            q = F.normalize(z_t.detach(), dim=0).unsqueeze(0)  # (1,D)
+            sims = (Z @ q.t()).squeeze(1)  # (N,)
+            topk = torch.topk(sims, k=min(self.k_mem, Z.size(0)), largest=True)
+            protos = mem_bank[topk.indices]  # (K,D) in original (unnorm) space
+            # average a few subsets to produce prototypes
+            cands.append(protos.mean(dim=0))
+            if protos.size(0) >= 2:
+                cands.append(protos[:2].mean(dim=0))
+            if protos.size(0) >= 3:
+                cands.append(protos[:3].mean(dim=0))
+        # dreamlets around current z
+        g = torch.Generator(device=device)
+        for _ in range(self.n_dreams):
+            eps = 0.08 * torch.randn(D, generator=g, device=device)
+            cands.append((z_t + eps).clamp_min(-2).clamp_max(2))
+
+        if len(cands) == 0:
+            # no memory yet; return zero bias
+            return torch.zeros(D, device=device), {"alpha": None, "used": 0}
+
+        C = torch.stack(cands, dim=0)  # (M,D)
+        # Attention conditioned on [z_t, h_t]
+        qv = self.query(torch.cat([z_t, h_t], dim=0))          # (D,)
+        A = torch.tanh(self.cand_proj(C))                      # (M,D)
+        scores = self.score(A * qv.unsqueeze(0)).squeeze(1)    # (M,)
+        alpha = torch.softmax(scores, dim=0)
+        mix_vec = (alpha.unsqueeze(1) * C).sum(dim=0)          # (D,)
+
+        raw_s = self.mix(mix_vec)                               # (D,)
+        gate = self.gate(torch.cat([z_t, h_t], dim=0))          # (1,)
+        s_t = gate.squeeze(0) * raw_s                           # gated bias
+
+        return s_t, {"alpha": alpha.detach().cpu(), "used": C.size(0)}
+
+
+# -----------------------------
+# NEW: TemporalCore (Stage A/B)
+# -----------------------------
+
+class TemporalCore(nn.Module):
+    """
+    Minimal, stable temporal module:
+      - Multi-timescale traces of z (fast/med/slow EMA)
+      - Latent velocity/acceleration
+      - Residual GRUCell over h (predict Δh), with LayerNorm for stability
+      - Optional subconscious bias projected into input space
+    Provides:
+      step(z, h, bias=None) -> h_next
+      rollout(h0, z0, steps) -> h_k (closed-loop with constant z0 context)
+    """
+    def __init__(self, model_dim: int,
+                 alpha_fast: float = 0.35, alpha_med: float = 0.12, alpha_slow: float = 0.04,
+                 use_z_context: bool = True):
+        super().__init__()
+        self.model_dim = model_dim
+        self.use_z = use_z_context
+
+        # Residual temporal operator
+        in_dim = model_dim  # we’ll map a rich context into model_dim via a small MLP
+        self.gru = nn.GRUCell(in_dim, model_dim)
+        self.post_ln = nn.LayerNorm(model_dim)
+
+        # Map context -> model_dim
+        ctx_in = model_dim * (1 + 3 + 2)  # z + (m_fast, m_med, m_slow) + (v, a)
+        self.ctx_proj = nn.Sequential(
+            nn.Linear(ctx_in, model_dim),
+            nn.Tanh(),
+        )
+
+        # Subconscious bias projection
+        self.bias_proj = nn.Linear(model_dim, model_dim)
+
+        # EMA alphas
+        self.register_buffer("alpha_fast", torch.tensor(alpha_fast))
+        self.register_buffer("alpha_med",  torch.tensor(alpha_med))
+        self.register_buffer("alpha_slow", torch.tensor(alpha_slow))
+
+        # Rolling state (will live on same device as the module)
+        self.register_buffer("m_fast", torch.zeros(model_dim))
+        self.register_buffer("m_med",  torch.zeros(model_dim))
+        self.register_buffer("m_slow", torch.zeros(model_dim))
+        self.register_buffer("z_prev", torch.zeros(model_dim))
+        self.register_buffer("v_prev", torch.zeros(model_dim))
+        self._inited = False
+
+    def _update_traces(self, z: torch.Tensor):
+        # initialize on first call
+        if not self._inited:
+            self.m_fast = z.detach().clone()
+            self.m_med  = z.detach().clone()
+            self.m_slow = z.detach().clone()
+            self.z_prev = z.detach().clone()
+            self.v_prev = torch.zeros_like(z)
+            self._inited = True
+
+        af, am, as_ = float(self.alpha_fast), float(self.alpha_med), float(self.alpha_slow)
+        with torch.no_grad():
+            self.m_fast = (1 - af) * self.m_fast + af * z
+            self.m_med  = (1 - am) * self.m_med  + am * z
+            self.m_slow = (1 - as_) * self.m_slow + as_ * z
+
+    def _make_context(self, z: torch.Tensor):
+        v = z - self.z_prev
+        a = v - self.v_prev
+        ctx = torch.cat([z, self.m_fast, self.m_med, self.m_slow, v, a], dim=0)
+        ctx = self.ctx_proj(ctx)
+        # roll history forward
+        with torch.no_grad():
+            self.v_prev = v.detach().clone()
+            self.z_prev = z.detach().clone()
+        return ctx
+
+    def step(self, z: torch.Tensor, h: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """One temporal evolution step for latent h using z-context + optional subconscious bias."""
+        self._update_traces(z)
+        ctx = self._make_context(z)
+        if bias is not None:
+            ctx = ctx + torch.tanh(self.bias_proj(bias))
+        dh = self.gru(ctx.unsqueeze(0), h.unsqueeze(0)).squeeze(0)
+        h_next = self.post_ln(h + dh)
+        return h_next
+
+    def rollout(self, h0: torch.Tensor, z0: torch.Tensor, steps: int) -> torch.Tensor:
+        """Closed-loop rollout from (h0, z0) for a fixed number of steps (no bias)."""
+        h = h0
+        for _ in range(steps):
+            ctx = self._make_context(z0)
+            dh = self.gru(ctx.unsqueeze(0), h.unsqueeze(0)).squeeze(0)
+            h = self.post_ln(h + dh)
+        return h
+
+
+# -----------------------------
 # ASI Seed Model
 # -----------------------------
 
@@ -305,15 +481,20 @@ class ASISeed(nn.Module):
         self.router  = NearestCentroidRouter(model_dim, num_clusters=num_clusters, momentum=0.02)
 
         self.oath = OathModule(model_dim, oath_dim=8)
+        self.subconscious = SubconsciousCore(model_dim=model_dim)  # NEW
 
-        # Optional tiny heads for course
+        # Optional tiny heads for course / prediction
         self.use_heads = use_heads
         if use_heads:
             self.predict_head = PredictHead(model_dim, input_dim)
             self.mask_head    = MaskHead(model_dim, input_dim)
 
+        # NEW: temporal core
+        self.temporal = TemporalCore(model_dim=model_dim)
+
         self.num_clusters = num_clusters
         self.stats: List[GrowthStats] = [GrowthStats() for _ in range(num_clusters)]
+        # Replay buffers store z (encoder space) per cluster
         self.buffers: List[List[torch.Tensor]] = [[] for _ in range(num_clusters)]
         self.canaries: List[List[torch.Tensor]] = [[] for _ in range(num_clusters)]
         self.max_buffer = 512
@@ -372,12 +553,46 @@ class ASISeed(nn.Module):
             p.requires_grad = False
         return ema
 
+    # ----- Forward (unchanged API) -----
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, int, torch.Tensor, torch.Tensor]:
         z = self.encoder(x)
         k = self.router(z)
         h = self.layer(z, active_cluster=k)
         x_hat = self.decoder(h)
         return x_hat, k, z.detach(), h
+
+    # ----- Subconscious helpers -----
+    def _mem_bank_for(self, k: int, device: torch.device) -> Optional[torch.Tensor]:
+        if len(self.buffers[k]) == 0:
+            return None
+        Z = torch.stack(self.buffers[k], dim=0).to(device)  # (N,D)
+        return Z
+
+    def subconscious_bias(self, z: torch.Tensor, h: torch.Tensor, k: int) -> Tuple[torch.Tensor, dict]:
+        """Compute subconscious bias s_t from buffer of cluster k."""
+        mem_bank = self._mem_bank_for(k, z.device)
+        return self.subconscious(z, h, mem_bank)  # (s_t, info)
+
+    # ----- NEW helpers for temporal-aware training/visualization -----
+    def temporal_step(self, z: torch.Tensor, h: torch.Tensor, k: int,
+                      s_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Advance latent h one step using TemporalCore + optional subconscious bias.
+        If s_bias is None, we compute it from buffers for cluster k.
+        """
+        if s_bias is None:
+            s_bias, _ = self.subconscious_bias(z, h, k)
+        return self.temporal.step(z, h, bias=s_bias)
+
+    def roll_latent(self, h0: torch.Tensor, z0: torch.Tensor, steps: int) -> torch.Tensor:
+        """Closed-loop roll of latent (no subconscious bias in this helper)."""
+        return self.temporal.rollout(h0, z0, steps)
+
+    def predict_pixels_from_h(self, h: torch.Tensor) -> torch.Tensor:
+        """Use predict_head if available; otherwise decode."""
+        if self.use_heads:
+            return self.predict_head(h)
+        return self.decoder(h)
 
     @torch.no_grad()
     def update_buffers(self, k: int, z: torch.Tensor):
@@ -422,7 +637,6 @@ class ASISeed(nn.Module):
         d = x.numel()
         k = max(1, int(mask_ratio * d))
         idx = torch.randperm(d)[:k]
-        _ = x.clone()  # placeholder; mask head uses latent only here
         y = self.mask_head(h)
         return F.mse_loss(y[idx], x[idx])
 
@@ -450,10 +664,11 @@ def run_basic(cfg: TrainConfig):
                     num_clusters=3, core_rank=cfg.core_rank).to(device)
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=cfg.lr)
 
-    # Realtime visualizer
-    viz = RealtimeViz(model_dim=cfg.model_dim,
-                      num_clusters=model.num_clusters,
-                      max_points=6000)
+    viz = None
+    if RealtimeViz is not None:
+        viz = RealtimeViz(model_dim=cfg.model_dim,
+                          num_clusters=model.num_clusters,
+                          max_points=6000)
 
     try:
         for step in range(1, cfg.steps + 1):
@@ -472,15 +687,15 @@ def run_basic(cfg: TrainConfig):
                 model.layer.V.grad[:] = orthogonalize_to_(model.layer.V.grad, model.layer.protected_basis_V)
             opt.step()
 
-            # EMA update against private copy
+            # EMA update
             ema_update_(model._ema, model, beta=cfg.ema_beta)
 
             with torch.no_grad():
                 model.router.update_centroid(k, z.detach())
             model.update_buffers(k, z.detach())
 
-            # ---- Realtime viz update (throttled) ----
-            if step % 2 == 0:
+            # Realtime viz update
+            if viz is not None and step % 2 == 0:
                 cent = model.router.centroids.detach().cpu().numpy()
                 ranks = [model.layer.U_res[i].shape[1] for i in range(model.num_clusters)]
                 viz.send(z=z.detach().cpu().numpy(), k=int(k), centroids=cent, ranks=ranks)
@@ -494,7 +709,7 @@ def run_basic(cfg: TrainConfig):
                 first = sum(gs.recent_losses[: cfg.plateau_window // 2]) / (cfg.plateau_window // 2)
                 last  = sum(gs.recent_losses[cfg.plateau_window // 2 :]) / (cfg.plateau_window // 2)
                 if (first - last) < cfg.plateau_improve_eps:
-                    model.grow_cluster(k, grow_rank=cfg.grow_rank_step)   # <— rebuilds EMA too
+                    model.grow_cluster(k, grow_rank=cfg.grow_rank_step)
                     gs.expansions += 1
                     model.consolidate_cluster(k)
                     with torch.no_grad():
@@ -511,7 +726,8 @@ def run_basic(cfg: TrainConfig):
                         losses.append(float(F.mse_loss(yy, xx).cpu()))
                     print(f"[step {step}] EMA canary MSE={sum(losses)/len(losses):.4f} | last k={k} dist={dist:.3f}")
     finally:
-        viz.close()
+        if viz is not None:
+            viz.close()
 
     return model
 
