@@ -1,0 +1,932 @@
+{
+  "total_videos": 100,
+  "train_videos": 80,
+  "test_videos": 20,
+  "colors": [
+    "red",
+    "blue",
+    "green",
+    "yellow",
+    "purple"
+  ],
+  "shapes": [
+    "circle",
+    "square",
+    "triangle"
+  ],
+  "motions": [
+    "horizontal",
+    "vertical",
+    "diagonal",
+    "circular",
+    "zigzag",
+    "rotating"
+  ],
+  "sizes": [
+    "small",
+    "medium",
+    "large"
+  ],
+  "videos": [
+    {
+      "id": 1,
+      "filename": "train_001_red_circle_horizontal_small.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "horizontal",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 2,
+      "filename": "train_002_red_circle_horizontal_medium.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 3,
+      "filename": "train_003_red_circle_vertical_small.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "vertical",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 4,
+      "filename": "train_004_red_circle_vertical_medium.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "vertical",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 5,
+      "filename": "train_005_red_circle_diagonal_small.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "diagonal",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 6,
+      "filename": "train_006_red_circle_diagonal_medium.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "diagonal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 7,
+      "filename": "train_007_red_circle_circular_small.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "circular",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 8,
+      "filename": "train_008_red_circle_circular_medium.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "circular",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 9,
+      "filename": "train_009_blue_square_horizontal_small.mp4",
+      "color": "blue",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 10,
+      "filename": "train_010_blue_square_horizontal_medium.mp4",
+      "color": "blue",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 11,
+      "filename": "train_011_blue_square_vertical_small.mp4",
+      "color": "blue",
+      "shape": "square",
+      "motion": "vertical",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 12,
+      "filename": "train_012_blue_square_vertical_medium.mp4",
+      "color": "blue",
+      "shape": "square",
+      "motion": "vertical",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 13,
+      "filename": "train_013_blue_square_zigzag_small.mp4",
+      "color": "blue",
+      "shape": "square",
+      "motion": "zigzag",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 14,
+      "filename": "train_014_blue_square_zigzag_medium.mp4",
+      "color": "blue",
+      "shape": "square",
+      "motion": "zigzag",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 15,
+      "filename": "train_015_green_triangle_rotating_small.mp4",
+      "color": "green",
+      "shape": "triangle",
+      "motion": "rotating",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 16,
+      "filename": "train_016_green_triangle_rotating_medium.mp4",
+      "color": "green",
+      "shape": "triangle",
+      "motion": "rotating",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 17,
+      "filename": "train_017_green_triangle_rotating_large.mp4",
+      "color": "green",
+      "shape": "triangle",
+      "motion": "rotating",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 18,
+      "filename": "train_018_yellow_circle_horizontal_medium.mp4",
+      "color": "yellow",
+      "shape": "circle",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 19,
+      "filename": "train_019_yellow_circle_vertical_medium.mp4",
+      "color": "yellow",
+      "shape": "circle",
+      "motion": "vertical",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 20,
+      "filename": "train_020_yellow_square_horizontal_medium.mp4",
+      "color": "yellow",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 21,
+      "filename": "train_021_yellow_square_vertical_medium.mp4",
+      "color": "yellow",
+      "shape": "square",
+      "motion": "vertical",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 22,
+      "filename": "train_022_purple_circle_circular_medium.mp4",
+      "color": "purple",
+      "shape": "circle",
+      "motion": "circular",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 23,
+      "filename": "train_023_purple_square_horizontal_medium.mp4",
+      "color": "purple",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 24,
+      "filename": "train_024_purple_triangle_horizontal_medium.mp4",
+      "color": "purple",
+      "shape": "triangle",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 25,
+      "filename": "train_025_red_circle_rotating_medium.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "rotating",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 26,
+      "filename": "train_026_blue_circle_vertical_large.mp4",
+      "color": "blue",
+      "shape": "circle",
+      "motion": "vertical",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 27,
+      "filename": "train_027_red_triangle_rotating_large.mp4",
+      "color": "red",
+      "shape": "triangle",
+      "motion": "rotating",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 28,
+      "filename": "train_028_red_triangle_circular_small.mp4",
+      "color": "red",
+      "shape": "triangle",
+      "motion": "circular",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 29,
+      "filename": "train_029_red_circle_vertical_small.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "vertical",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 30,
+      "filename": "train_030_purple_triangle_horizontal_large.mp4",
+      "color": "purple",
+      "shape": "triangle",
+      "motion": "horizontal",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 31,
+      "filename": "train_031_blue_triangle_rotating_large.mp4",
+      "color": "blue",
+      "shape": "triangle",
+      "motion": "rotating",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 32,
+      "filename": "train_032_purple_square_vertical_medium.mp4",
+      "color": "purple",
+      "shape": "square",
+      "motion": "vertical",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 33,
+      "filename": "train_033_purple_square_horizontal_small.mp4",
+      "color": "purple",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 34,
+      "filename": "train_034_yellow_square_diagonal_small.mp4",
+      "color": "yellow",
+      "shape": "square",
+      "motion": "diagonal",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 35,
+      "filename": "train_035_blue_square_horizontal_small.mp4",
+      "color": "blue",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 36,
+      "filename": "train_036_yellow_circle_diagonal_medium.mp4",
+      "color": "yellow",
+      "shape": "circle",
+      "motion": "diagonal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 37,
+      "filename": "train_037_purple_square_horizontal_large.mp4",
+      "color": "purple",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 38,
+      "filename": "train_038_yellow_triangle_horizontal_medium.mp4",
+      "color": "yellow",
+      "shape": "triangle",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 39,
+      "filename": "train_039_red_triangle_diagonal_large.mp4",
+      "color": "red",
+      "shape": "triangle",
+      "motion": "diagonal",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 40,
+      "filename": "train_040_purple_square_zigzag_small.mp4",
+      "color": "purple",
+      "shape": "square",
+      "motion": "zigzag",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 41,
+      "filename": "train_041_red_circle_rotating_small.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "rotating",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 42,
+      "filename": "train_042_green_circle_vertical_small.mp4",
+      "color": "green",
+      "shape": "circle",
+      "motion": "vertical",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 43,
+      "filename": "train_043_yellow_square_circular_large.mp4",
+      "color": "yellow",
+      "shape": "square",
+      "motion": "circular",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 44,
+      "filename": "train_044_green_circle_diagonal_medium.mp4",
+      "color": "green",
+      "shape": "circle",
+      "motion": "diagonal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 45,
+      "filename": "train_045_blue_triangle_diagonal_large.mp4",
+      "color": "blue",
+      "shape": "triangle",
+      "motion": "diagonal",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 46,
+      "filename": "train_046_red_triangle_rotating_small.mp4",
+      "color": "red",
+      "shape": "triangle",
+      "motion": "rotating",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 47,
+      "filename": "train_047_purple_triangle_vertical_small.mp4",
+      "color": "purple",
+      "shape": "triangle",
+      "motion": "vertical",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 48,
+      "filename": "train_048_yellow_square_diagonal_large.mp4",
+      "color": "yellow",
+      "shape": "square",
+      "motion": "diagonal",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 49,
+      "filename": "train_049_purple_circle_rotating_medium.mp4",
+      "color": "purple",
+      "shape": "circle",
+      "motion": "rotating",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 50,
+      "filename": "train_050_red_circle_horizontal_medium.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 51,
+      "filename": "train_051_yellow_square_horizontal_small.mp4",
+      "color": "yellow",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 52,
+      "filename": "train_052_purple_triangle_diagonal_small.mp4",
+      "color": "purple",
+      "shape": "triangle",
+      "motion": "diagonal",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 53,
+      "filename": "train_053_yellow_square_rotating_medium.mp4",
+      "color": "yellow",
+      "shape": "square",
+      "motion": "rotating",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 54,
+      "filename": "train_054_blue_square_vertical_small.mp4",
+      "color": "blue",
+      "shape": "square",
+      "motion": "vertical",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 55,
+      "filename": "train_055_purple_triangle_diagonal_large.mp4",
+      "color": "purple",
+      "shape": "triangle",
+      "motion": "diagonal",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 56,
+      "filename": "train_056_purple_square_zigzag_medium.mp4",
+      "color": "purple",
+      "shape": "square",
+      "motion": "zigzag",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 57,
+      "filename": "train_057_green_circle_vertical_large.mp4",
+      "color": "green",
+      "shape": "circle",
+      "motion": "vertical",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 58,
+      "filename": "train_058_yellow_circle_horizontal_small.mp4",
+      "color": "yellow",
+      "shape": "circle",
+      "motion": "horizontal",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 59,
+      "filename": "train_059_blue_triangle_vertical_large.mp4",
+      "color": "blue",
+      "shape": "triangle",
+      "motion": "vertical",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 60,
+      "filename": "train_060_yellow_triangle_horizontal_medium.mp4",
+      "color": "yellow",
+      "shape": "triangle",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 61,
+      "filename": "train_061_yellow_triangle_circular_large.mp4",
+      "color": "yellow",
+      "shape": "triangle",
+      "motion": "circular",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 62,
+      "filename": "train_062_green_triangle_horizontal_large.mp4",
+      "color": "green",
+      "shape": "triangle",
+      "motion": "horizontal",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 63,
+      "filename": "train_063_red_triangle_zigzag_medium.mp4",
+      "color": "red",
+      "shape": "triangle",
+      "motion": "zigzag",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 64,
+      "filename": "train_064_green_circle_diagonal_medium.mp4",
+      "color": "green",
+      "shape": "circle",
+      "motion": "diagonal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 65,
+      "filename": "train_065_blue_square_horizontal_large.mp4",
+      "color": "blue",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 66,
+      "filename": "train_066_green_triangle_vertical_large.mp4",
+      "color": "green",
+      "shape": "triangle",
+      "motion": "vertical",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 67,
+      "filename": "train_067_red_triangle_diagonal_large.mp4",
+      "color": "red",
+      "shape": "triangle",
+      "motion": "diagonal",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 68,
+      "filename": "train_068_purple_triangle_vertical_small.mp4",
+      "color": "purple",
+      "shape": "triangle",
+      "motion": "vertical",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 69,
+      "filename": "train_069_green_circle_zigzag_large.mp4",
+      "color": "green",
+      "shape": "circle",
+      "motion": "zigzag",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 70,
+      "filename": "train_070_red_triangle_diagonal_medium.mp4",
+      "color": "red",
+      "shape": "triangle",
+      "motion": "diagonal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 71,
+      "filename": "train_071_red_circle_diagonal_medium.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "diagonal",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 72,
+      "filename": "train_072_blue_circle_vertical_large.mp4",
+      "color": "blue",
+      "shape": "circle",
+      "motion": "vertical",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 73,
+      "filename": "train_073_red_circle_rotating_medium.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "rotating",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 74,
+      "filename": "train_074_red_triangle_vertical_small.mp4",
+      "color": "red",
+      "shape": "triangle",
+      "motion": "vertical",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 75,
+      "filename": "train_075_yellow_triangle_vertical_medium.mp4",
+      "color": "yellow",
+      "shape": "triangle",
+      "motion": "vertical",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 76,
+      "filename": "train_076_purple_triangle_circular_small.mp4",
+      "color": "purple",
+      "shape": "triangle",
+      "motion": "circular",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 77,
+      "filename": "train_077_purple_triangle_rotating_small.mp4",
+      "color": "purple",
+      "shape": "triangle",
+      "motion": "rotating",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 78,
+      "filename": "train_078_green_square_rotating_large.mp4",
+      "color": "green",
+      "shape": "square",
+      "motion": "rotating",
+      "size": "large",
+      "type": "train"
+    },
+    {
+      "id": 79,
+      "filename": "train_079_green_square_zigzag_medium.mp4",
+      "color": "green",
+      "shape": "square",
+      "motion": "zigzag",
+      "size": "medium",
+      "type": "train"
+    },
+    {
+      "id": 80,
+      "filename": "train_080_red_circle_vertical_small.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "vertical",
+      "size": "small",
+      "type": "train"
+    },
+    {
+      "id": 81,
+      "filename": "test_081_red_square_horizontal_medium.mp4",
+      "color": "red",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "test"
+    },
+    {
+      "id": 82,
+      "filename": "test_082_blue_circle_vertical_medium.mp4",
+      "color": "blue",
+      "shape": "circle",
+      "motion": "vertical",
+      "size": "medium",
+      "type": "test"
+    },
+    {
+      "id": 83,
+      "filename": "test_083_green_circle_circular_large.mp4",
+      "color": "green",
+      "shape": "circle",
+      "motion": "circular",
+      "size": "large",
+      "type": "test"
+    },
+    {
+      "id": 84,
+      "filename": "test_084_blue_triangle_diagonal_medium.mp4",
+      "color": "blue",
+      "shape": "triangle",
+      "motion": "diagonal",
+      "size": "medium",
+      "type": "test"
+    },
+    {
+      "id": 85,
+      "filename": "test_085_yellow_triangle_zigzag_small.mp4",
+      "color": "yellow",
+      "shape": "triangle",
+      "motion": "zigzag",
+      "size": "small",
+      "type": "test"
+    },
+    {
+      "id": 86,
+      "filename": "test_086_purple_triangle_vertical_large.mp4",
+      "color": "purple",
+      "shape": "triangle",
+      "motion": "vertical",
+      "size": "large",
+      "type": "test"
+    },
+    {
+      "id": 87,
+      "filename": "test_087_red_circle_horizontal_large.mp4",
+      "color": "red",
+      "shape": "circle",
+      "motion": "horizontal",
+      "size": "large",
+      "type": "test"
+    },
+    {
+      "id": 88,
+      "filename": "test_088_blue_square_circular_small.mp4",
+      "color": "blue",
+      "shape": "square",
+      "motion": "circular",
+      "size": "small",
+      "type": "test"
+    },
+    {
+      "id": 89,
+      "filename": "test_089_green_square_horizontal_medium.mp4",
+      "color": "green",
+      "shape": "square",
+      "motion": "horizontal",
+      "size": "medium",
+      "type": "test"
+    },
+    {
+      "id": 90,
+      "filename": "test_090_yellow_circle_zigzag_medium.mp4",
+      "color": "yellow",
+      "shape": "circle",
+      "motion": "zigzag",
+      "size": "medium",
+      "type": "test"
+    },
+    {
+      "id": 91,
+      "filename": "test_091_red_triangle_vertical_small.mp4",
+      "color": "red",
+      "shape": "triangle",
+      "motion": "vertical",
+      "size": "small",
+      "type": "test"
+    },
+    {
+      "id": 92,
+      "filename": "test_092_blue_circle_zigzag_large.mp4",
+      "color": "blue",
+      "shape": "circle",
+      "motion": "zigzag",
+      "size": "large",
+      "type": "test"
+    },
+    {
+      "id": 93,
+      "filename": "test_093_green_square_vertical_small.mp4",
+      "color": "green",
+      "shape": "square",
+      "motion": "vertical",
+      "size": "small",
+      "type": "test"
+    },
+    {
+      "id": 94,
+      "filename": "test_094_yellow_square_circular_large.mp4",
+      "color": "yellow",
+      "shape": "square",
+      "motion": "circular",
+      "size": "large",
+      "type": "test"
+    },
+    {
+      "id": 95,
+      "filename": "test_095_purple_circle_diagonal_small.mp4",
+      "color": "purple",
+      "shape": "circle",
+      "motion": "diagonal",
+      "size": "small",
+      "type": "test"
+    },
+    {
+      "id": 96,
+      "filename": "test_096_red_square_circular_large.mp4",
+      "color": "red",
+      "shape": "square",
+      "motion": "circular",
+      "size": "large",
+      "type": "test"
+    },
+    {
+      "id": 97,
+      "filename": "test_097_blue_triangle_horizontal_small.mp4",
+      "color": "blue",
+      "shape": "triangle",
+      "motion": "horizontal",
+      "size": "small",
+      "type": "test"
+    },
+    {
+      "id": 98,
+      "filename": "test_098_green_circle_zigzag_medium.mp4",
+      "color": "green",
+      "shape": "circle",
+      "motion": "zigzag",
+      "size": "medium",
+      "type": "test"
+    },
+    {
+      "id": 99,
+      "filename": "test_099_yellow_triangle_vertical_medium.mp4",
+      "color": "yellow",
+      "shape": "triangle",
+      "motion": "vertical",
+      "size": "medium",
+      "type": "test"
+    },
+    {
+      "id": 100,
+      "filename": "test_100_purple_square_rotating_large.mp4",
+      "color": "purple",
+      "shape": "square",
+      "motion": "rotating",
+      "size": "large",
+      "type": "test"
+    }
+  ]
+}
