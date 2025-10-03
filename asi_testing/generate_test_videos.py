@@ -3,9 +3,13 @@
 
 import cv2
 import numpy as np
-import os
 import random
 import json
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from asi_model import ASISeed, CuriosityStream, to_device
+
 
 # Define our vocabulary
 COLORS = {

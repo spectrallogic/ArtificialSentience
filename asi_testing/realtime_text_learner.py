@@ -4,8 +4,10 @@
 
 import torch
 import torch.nn.functional as F
-from asi_model import ASISeed, to_device
-import time
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from asi_model import ASISeed, CuriosityStream, to_device
 
 
 class SimpleTextEncoder:

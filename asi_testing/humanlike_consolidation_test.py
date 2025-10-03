@@ -3,6 +3,9 @@
 
 import torch
 import torch.nn.functional as F
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from asi_model import ASISeed, CuriosityStream, to_device
 
 
@@ -109,7 +112,7 @@ def test_relearning_speed(model, stream, initial_loss, steps=50, lr=1e-3):
 def main():
     print("=" * 70)
     print("HUMAN-LIKE CONSOLIDATION TEST")
-    print("Testing: Does consolidation create abstract, durable memories?")
+    print("other_experiments: Does consolidation create abstract, durable memories?")
     print("=" * 70)
 
     # Setup
@@ -298,7 +301,7 @@ if __name__ == "__main__":
 Results:
 ======================================================================
 HUMAN-LIKE CONSOLIDATION TEST
-Testing: Does consolidation create abstract, durable memories?
+other_experiments: Does consolidation create abstract, durable memories?
 ======================================================================
 
 Device: cpu
