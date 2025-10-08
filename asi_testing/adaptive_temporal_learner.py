@@ -30,9 +30,10 @@ class AdaptiveTemporalLearner:
         self.input_dim = frame_size * frame_size  # Grayscale for simplicity
 
         # Model with temporal core and subconscious
+        self.model_dim = 192
         self.model = ASISeed(
             input_dim=self.input_dim,
-            model_dim=192,
+            model_dim=self.model_dim,
             num_clusters=16,
             core_rank=4,
             build_ema=False,
@@ -45,9 +46,13 @@ class AdaptiveTemporalLearner:
         )
 
         # Temporal state (multi-timescale)
-        self.h_current = torch.zeros(self.model.model_dim, device=self.device)
+        self.h_current = torch.zeros(self.model_dim, device=self.device)
         self.last_encoded_frame = None
         self.last_z = None
+
+        # Display state (keep last reconstruction/prediction visible)
+        self.last_recon = None
+        self.last_pred = None
 
         # Event detection (change threshold)
         self.change_threshold = 0.15  # Encode when change > threshold
@@ -143,10 +148,13 @@ class AdaptiveTemporalLearner:
         if len(self.model.buffers[k]) > 0:
             mem_bank = torch.stack(self.model.buffers[k][-32:], dim=0)
 
-        subconscious_bias, subc_info = self.model.subconscious(z, self.h_current, mem_bank)
+        # Detach h_current to avoid backprop through previous iterations
+        h_detached = self.h_current.detach()
+
+        subconscious_bias, subc_info = self.model.subconscious(z, h_detached, mem_bank)
 
         # Update temporal state (with subconscious influence)
-        self.h_current = self.model.temporal(z, self.h_current, bias=subconscious_bias)
+        h_new = self.model.temporal(z, h_detached, bias=subconscious_bias)
 
         # Forward through layer
         h_latent = self.model.layer(z, active_cluster=k)
@@ -157,7 +165,7 @@ class AdaptiveTemporalLearner:
         # Predict future (if we have prediction head)
         x_pred = None
         if self.model.use_heads:
-            x_pred = self.model.predict_head(self.h_current)
+            x_pred = self.model.predict_head(h_new)
 
         # Losses
         recon_loss = F.mse_loss(x_recon, x)
@@ -191,8 +199,14 @@ class AdaptiveTemporalLearner:
         self._check_growth(k, recon_loss.item())
 
         # Update state
+        self.h_current = h_new.detach()  # Detach to free computation graph
         self.last_encoded_frame = x.detach()
         self.last_z = z.detach()
+
+        # Cache display tensors
+        self.last_recon = x_recon.detach()
+        self.last_pred = x_pred.detach() if x_pred is not None else None
+
         self.encoded_frames += 1
         self.total_steps += 1
 
@@ -248,8 +262,10 @@ class AdaptiveTemporalLearner:
             # Encode and learn
             x_recon, x_pred, info = self.encode_and_learn(x)
 
-            # Create visualization
-            display = self._create_display(frame, x_recon, x_pred, info, change_mag)
+            # Create visualization with fresh data
+            display = self._create_display(
+                frame, x_recon, x_pred, info, change_mag, is_skip=False
+            )
 
             self.frames_since_encode = 0
 
@@ -259,49 +275,76 @@ class AdaptiveTemporalLearner:
             self.frames_since_encode += 1
             self.skipped_frames += 1
 
-            # Still show something (previous reconstruction + skip indicator)
-            display = frame.copy()
-            cv2.putText(display, f"SKIP (change={change_mag:.3f})",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            # Show display with CACHED reconstruction/prediction
+            info = {
+                'skipped': True,
+                'change': change_mag,
+                'k': -1,
+                'recon_loss': 0,
+                'pred_loss': 0,
+                'total_loss': 0
+            }
 
-            return False, display, {'skipped': True, 'change': change_mag}
+            display = self._create_display(
+                frame,
+                self.last_recon if self.last_recon is not None else x,
+                self.last_pred,
+                info,
+                change_mag,
+                is_skip=True
+            )
 
-    def _create_display(self, original, recon_tensor, pred_tensor, info, change_mag):
+            return False, display, info
+
+    def _create_display(self, original, recon_tensor, pred_tensor, info, change_mag, is_skip=False):
         """Create visualization showing original, reconstruction, and prediction."""
-        h, w = original.shape[:2]
+        # Standardize display size
+        display_size = 320
+
+        # Resize original to match
+        original_resized = cv2.resize(original, (display_size, display_size))
 
         # Convert tensors to frames
-        recon_frame = self.tensor_to_frame(recon_tensor, size=w)
+        recon_frame = self.tensor_to_frame(recon_tensor, size=display_size)
         recon_color = cv2.cvtColor(recon_frame, cv2.COLOR_GRAY2BGR)
 
         if pred_tensor is not None:
-            pred_frame = self.tensor_to_frame(pred_tensor, size=w)
+            pred_frame = self.tensor_to_frame(pred_tensor, size=display_size)
             pred_color = cv2.cvtColor(pred_frame, cv2.COLOR_GRAY2BGR)
         else:
-            pred_color = np.zeros_like(original)
+            pred_color = np.zeros((display_size, display_size, 3), dtype=np.uint8)
 
         # Stack: [Original | Reconstruction | Prediction]
-        display = np.hstack([original, recon_color, pred_color])
+        display = np.hstack([original_resized, recon_color, pred_color])
 
         # Add info overlay
         efficiency = (1 - self.encoded_frames / max(1, self.total_frames)) * 100
 
+        # Panel labels
+        label_color = (0, 255, 255) if is_skip else (0, 255, 0)
         cv2.putText(display, "ORIGINAL", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(display, "RECONSTRUCTION", (w + 10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, label_color, 2)
+        cv2.putText(display, "RECONSTRUCTION", (display_size + 10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-        cv2.putText(display, "PREDICTION", (2 * w + 10, 30),
+        cv2.putText(display, "PREDICTION", (2 * display_size + 10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
+        # Skip indicator
+        if is_skip:
+            cv2.putText(display, "SKIPPING", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
         # Stats
-        y_offset = 60
+        y_offset = 90
         stats = [
             f"Total: {self.total_frames} | Encoded: {self.encoded_frames} | Skipped: {self.skipped_frames}",
             f"Efficiency: {efficiency:.1f}% frames skipped",
-            f"Change: {change_mag:.3f} | Cluster: {info['k']}",
-            f"Loss: {info['total_loss']:.4f} (R:{info['recon_loss']:.4f}, P:{info['pred_loss']:.4f})",
-            f"Growth events: {len(self.growth_events)}",
+            f"Change: {change_mag:.3f}" + (f" | Cluster: {info['k']}" if not is_skip else ""),
         ]
+
+        if not is_skip:
+            stats.append(f"Loss: {info['total_loss']:.4f} (R:{info['recon_loss']:.4f}, P:{info['pred_loss']:.4f})")
+            stats.append(f"Growth events: {len(self.growth_events)}")
 
         for i, text in enumerate(stats):
             cv2.putText(display, text, (10, y_offset + i * 25),
