@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn.functional as F
 import numpy as np
-from asi_model import ASISeed, to_device
+from baby_asi import ASISeed, to_device
 
 
 def create_synthetic_video_stream(num_patterns=5, input_dim=1024, complexity=0.5):

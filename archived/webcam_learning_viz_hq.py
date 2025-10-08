@@ -21,7 +21,7 @@ import torch.nn.functional as F
 
 # Import ASISeed from repo root
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from asi_model import ASISeed  # needs use_heads=True for predict_head
+from baby_asi import ASISeed  # needs use_heads=True for predict_head
 
 # -----------------------------
 # Config (bump these if you want even higher res)

@@ -1,4 +1,4 @@
-# asi_model.py
+# baby_asi.py
 # ASI Seed (self-discovering): Always-Training, Non-Uniformly Expanding Low-Rank Model
 # + TemporalCore: multi-timescale traces + stable residual GRU for sequence flow
 # + SubconsciousCore: memory- & noise-driven "urge" that softly biases temporal evolution
@@ -13,7 +13,7 @@ import numpy as np
 
 # If you use the realtime viz, keep this import. Otherwise it's harmless to leave.
 try:
-    from asi_viz_rt import RealtimeViz  # realtime 3D viewer
+    from archived.asi_viz_rt import RealtimeViz  # realtime 3D viewer
 except Exception:
     RealtimeViz = None
 

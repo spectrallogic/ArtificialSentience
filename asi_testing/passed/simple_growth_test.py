@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn.functional as F
-from asi_model import ASISeed, CuriosityStream, to_device
+from baby_asi import ASISeed, CuriosityStream, to_device
 
 
 def test_with_exploration():

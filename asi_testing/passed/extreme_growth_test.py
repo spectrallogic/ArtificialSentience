@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn.functional as F
 import numpy as np
-from asi_model import ASISeed, to_device
+from baby_asi import ASISeed, to_device
 
 
 def create_extreme_stream(input_dim=2048, num_base=5, num_mixtures=10):

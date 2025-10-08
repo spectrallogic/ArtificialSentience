@@ -14,8 +14,8 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-from asi_model import (ASISeed, CuriosityStream, to_device, ema_update_, orthogonalize_to_,
-                       TrainConfig as BaseCfg)
+from baby_asi import (ASISeed, CuriosityStream, to_device, ema_update_, orthogonalize_to_,
+                      TrainConfig as BaseCfg)
 
 plt.rcParams.update({"figure.figsize": (6, 4), "figure.dpi": 120})
 

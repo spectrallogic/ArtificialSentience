@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from collections import deque
-from asi_model import ASISeed, to_device
+from baby_asi import ASISeed, to_device
 
 
 class AdaptiveTemporalLearner:
