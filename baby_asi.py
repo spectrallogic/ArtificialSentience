@@ -2,8 +2,10 @@
 # ASI Seed (self-discovering): Always-Training, Non-Uniformly Expanding Low-Rank Model
 # + TemporalCore: multi-timescale traces + stable residual GRU for sequence flow
 # + SubconsciousCore: memory- & noise-driven "urge" that softly biases temporal evolution
+# + Easy-to-use growth mechanism: Just call check_and_grow_cluster()!
 #
 # UPDATED: Router now includes exploration (tau/eps) to prevent cluster collapse!
+# UPDATED: Simplified growth checking for external use
 
 import argparse
 import random
@@ -600,6 +602,72 @@ class ASISeed(nn.Module):
         pred = self.predict_head(h)
         return F.mse_loss(pred, x_target)
 
+    # -----------------------------
+    # NEW: Easy-to-use growth checking!
+    # -----------------------------
+
+    def check_and_grow_cluster(self, k: int, loss: float,
+                               window_size: int = 50,
+                               improvement_threshold: float = 0.01,
+                               grow_rank: int = 2,
+                               verbose: bool = True) -> bool:
+        """
+        Check if cluster k has plateaued and grow it if needed.
+        Call this after each training step!
+
+        Args:
+            k: Cluster index
+            loss: Current loss value
+            window_size: How many recent losses to track (default 50)
+            improvement_threshold: Minimum improvement needed (default 0.01)
+            grow_rank: How much to grow by (default 2)
+            verbose: Print when growth happens (default True)
+
+        Returns:
+            True if growth occurred, False otherwise
+
+        Example usage:
+            loss = train_step(...)
+            if model.check_and_grow_cluster(k, loss.item()):
+                print("Growth happened!")
+        """
+        stats = self.stats[k]
+
+        # Track loss
+        stats.recent_losses.append(loss)
+        stats.samples += 1
+
+        # Keep window size manageable
+        if len(stats.recent_losses) > window_size:
+            stats.recent_losses.pop(0)
+
+        # Need enough samples to check
+        if len(stats.recent_losses) < window_size:
+            return False
+
+        # Check if plateaued
+        first_half = stats.recent_losses[:window_size // 2]
+        second_half = stats.recent_losses[window_size // 2:]
+        first_avg = sum(first_half) / len(first_half)
+        second_avg = sum(second_half) / len(second_half)
+        improvement = first_avg - second_avg
+
+        # If not improving enough, GROW!
+        if improvement < improvement_threshold and second_avg > 0.015:
+            old_rank = self.layer.U_res[k].shape[1] if self.layer.U_res[k].numel() > 0 else 0
+            self.grow_cluster(k, grow_rank=grow_rank)
+            new_rank = self.layer.U_res[k].shape[1]
+            stats.expansions += 1
+            stats.recent_losses.clear()  # Reset after growth
+
+            if verbose:
+                print(
+                    f"🌱 GROWTH! Cluster {k}: rank {old_rank} → {new_rank} (loss={second_avg:.4f}, improvement={improvement:.4f})")
+
+            return True
+
+        return False
+
 
 # -----------------------------
 # Training config and basic run
@@ -691,23 +759,18 @@ def run_basic(cfg: TrainConfig):
                 ranks = [model.layer.U_res[i].shape[1] for i in range(model.num_clusters)]
                 viz.send(z=z.detach().cpu().numpy(), k=int(k), centroids=cent, ranks=ranks)
 
-            gs = model.stats[k]
-            gs.recent_losses.append(float(loss.detach().cpu()));
-            gs.samples += 1
-            if len(gs.recent_losses) > cfg.plateau_window:
-                gs.recent_losses.pop(0)
-
-            if step % cfg.grow_check_every == 0 and len(gs.recent_losses) == cfg.plateau_window:
-                first = sum(gs.recent_losses[: cfg.plateau_window // 2]) / (cfg.plateau_window // 2)
-                last = sum(gs.recent_losses[cfg.plateau_window // 2:]) / (cfg.plateau_window // 2)
-                if (first - last) < cfg.plateau_improve_eps:
-                    model.grow_cluster(k, grow_rank=cfg.grow_rank_step)
-                    gs.expansions += 1
+            # NEW: Use the easy growth checking!
+            if step % cfg.grow_check_every == 0:
+                if model.check_and_grow_cluster(
+                        k,
+                        loss.item(),
+                        window_size=cfg.plateau_window,
+                        improvement_threshold=cfg.plateau_improve_eps,
+                        grow_rank=cfg.grow_rank_step
+                ):
                     model.consolidate_cluster(k)
                     with torch.no_grad():
                         model.layer.protected_basis_V = torch.clone(model.layer.V.data.detach())
-                    print(f"[step {step}] Growth on discovered cluster {k}: +{cfg.grow_rank_step} rank "
-                          f"(expansions={gs.expansions})")
 
             if step % 200 == 0 and model._ema is not None:
                 with torch.no_grad():
