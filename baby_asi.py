@@ -3,9 +3,11 @@
 # + TemporalCore: multi-timescale traces + stable residual GRU for sequence flow
 # + SubconsciousCore: memory- & noise-driven "urge" that softly biases temporal evolution
 # + Easy-to-use growth mechanism: Just call check_and_grow_cluster()!
+# + RECURSIVE REFINEMENT: Iteratively improve answers like humans solving puzzles!
 #
 # UPDATED: Router now includes exploration (tau/eps) to prevent cluster collapse!
 # UPDATED: Simplified growth checking for external use
+# UPDATED: Added recursive refinement methods for deep supervision
 
 import argparse
 import random
@@ -132,15 +134,13 @@ class TinyDecoder(nn.Module):
 
 
 # -----------------------------
-# Router with EXPLORATION (FIXED!)
+# Router with EXPLORATION
 # -----------------------------
 
 class NearestCentroidRouter(nn.Module):
     """
     Router with exploration capabilities.
     Prevents cluster collapse by using temperature and epsilon-greedy exploration.
-
-    NEW: Added tau and eps parameters for exploration!
     """
 
     def __init__(self, emb_dim: int, num_clusters: int, momentum: float = 0.02):
@@ -176,10 +176,7 @@ class NearestCentroidRouter(nn.Module):
         Args:
             z: Input embedding to route
             tau: Temperature (lower = more greedy). Range: 0.1 to 2.0
-                 - High tau (2.0): explores widely, tries different clusters
-                 - Low tau (0.5): exploits, picks best cluster
             eps: Epsilon-greedy probability (0 to 0.3)
-                 - Probability of picking a random cluster
 
         Returns:
             Cluster index (int)
@@ -193,9 +190,7 @@ class NearestCentroidRouter(nn.Module):
 
         # Temperature-based selection
         if self.training and tau > 0:
-            # Softmax with temperature: higher tau = more uniform
             probs = F.softmax(sims / tau, dim=0)
-            # Sample from distribution
             return int(torch.multinomial(probs, 1).item())
         else:
             # Greedy: pick best match (for evaluation)
@@ -299,9 +294,9 @@ class OathModule(nn.Module):
     def __init__(self, model_dim: int, oath_dim: int = 8):
         super().__init__()
         self.projector = nn.Linear(model_dim, oath_dim, bias=False)
-        g = torch.Generator(device='cpu');
+        g = torch.Generator(device='cpu')
         g.manual_seed(777)
-        c = torch.randn(oath_dim, generator=g);
+        c = torch.randn(oath_dim, generator=g)
         c = F.normalize(c, dim=0)
         self.register_buffer("c_star", c)
 
@@ -320,11 +315,6 @@ class OathModule(nn.Module):
 class SubconsciousCore(nn.Module):
     """
     Produces a 'bias' vector s_t in latent space that softly steers temporal evolution.
-    Ingredients:
-      - memory prototypes (top-k similar past z's)
-      - 'dreamlets' (noisy variations)
-      - attention over candidates conditioned on [z_t, h_t]
-    Output: s_t in R^{model_dim}. Magnitude is controlled by a learned gate.
     """
 
     def __init__(self, model_dim: int, k_mem: int = 8, n_dreams: int = 4):
@@ -377,28 +367,21 @@ class SubconsciousCore(nn.Module):
             cands.append(dream.unsqueeze(0))
 
         if len(cands) == 0:
-            # No candidates
             return torch.zeros(D, device=device), {"n_cands": 0}
 
         C = torch.cat(cands, dim=0)  # (M, D)
         M = C.size(0)
 
-        # Query from [z_t, h_t]
         ctx = torch.cat([z_t, h_t], dim=0)  # (2D,)
         q_vec = self.query(ctx)  # (D,)
 
-        # Scores
         C_proj = self.cand_proj(C)  # (M, D)
         logits = self.score(C_proj * q_vec.unsqueeze(0)).squeeze(1)  # (M,)
         attn = F.softmax(logits, dim=0)  # (M,)
 
-        # Weighted sum
         s_raw = (attn.unsqueeze(1) * C).sum(dim=0)  # (D,)
-
-        # Mix
         s_mixed = self.mix(s_raw)
 
-        # Gate magnitude
         g = self.gate(ctx)  # (1,)
         s_t = g * s_mixed
 
@@ -413,18 +396,14 @@ class SubconsciousCore(nn.Module):
 class TemporalCore(nn.Module):
     """
     Multi-timescale memory traces + GRU-based hidden update.
-    Provides temporal continuity and short/long-term context.
     """
 
     def __init__(self, model_dim: int):
         super().__init__()
         self.model_dim = model_dim
-        # Multi-scale traces
         self.register_buffer("trace_fast", torch.zeros(model_dim))
         self.register_buffer("trace_slow", torch.zeros(model_dim))
-        # GRU cell for stable updates
         self.gru = nn.GRUCell(model_dim, model_dim)
-        # Projection for subconscious bias
         self.bias_proj = nn.Linear(model_dim, model_dim)
         self.post_ln = nn.LayerNorm(model_dim)
 
@@ -438,12 +417,6 @@ class TemporalCore(nn.Module):
         return z + 0.3 * self.trace_fast + 0.1 * self.trace_slow
 
     def forward(self, z: torch.Tensor, h: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        z: encoder output
-        h: current hidden state
-        bias: optional subconscious bias vector
-        returns: updated hidden state
-        """
         self._update_traces(z)
         ctx = self._make_context(z)
         if bias is not None:
@@ -453,7 +426,6 @@ class TemporalCore(nn.Module):
         return h_next
 
     def rollout(self, h0: torch.Tensor, z0: torch.Tensor, steps: int) -> torch.Tensor:
-        """Closed-loop rollout from (h0, z0) for a fixed number of steps (no bias)."""
         h = h0
         for _ in range(steps):
             ctx = self._make_context(z0)
@@ -485,27 +457,22 @@ class ASISeed(nn.Module):
         self.oath = OathModule(model_dim, oath_dim=8)
         self.subconscious = SubconsciousCore(model_dim=model_dim)
 
-        # Optional tiny heads for course / prediction
         self.use_heads = use_heads
         if use_heads:
             self.predict_head = PredictHead(model_dim, input_dim)
             self.mask_head = MaskHead(model_dim, input_dim)
 
-        # temporal core
         self.temporal = TemporalCore(model_dim=model_dim)
 
         self.num_clusters = num_clusters
         self.stats: List[GrowthStats] = [GrowthStats() for _ in range(num_clusters)]
-        # Replay buffers store z (encoder space) per cluster
         self.buffers: List[List[torch.Tensor]] = [[] for _ in range(num_clusters)]
         self.canaries: List[List[torch.Tensor]] = [[] for _ in range(num_clusters)]
         self.max_buffer = 1024
         self.max_canary = 256
 
-        # record hparams (used when we rebuild EMA)
         self._record_hparams(input_dim, model_dim, num_clusters, core_rank, self.use_heads)
 
-        # Private (unregistered) EMA copy to avoid polluting state_dict()
         self._ema: Optional[ASISeed] = None
         if build_ema:
             self._ema = ASISeed._make_ema(self, input_dim, model_dim, num_clusters, core_rank, use_heads)
@@ -520,7 +487,6 @@ class ASISeed(nn.Module):
         }
 
     def rebuild_ema(self):
-        """Recreate EMA with the current parameter shapes and copy weights."""
         if self._ema is None:
             return
         hp = self._hparams
@@ -543,15 +509,8 @@ class ASISeed(nn.Module):
         return ema_copy
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, int, torch.Tensor, torch.Tensor]:
-        """
-        Returns: (x_hat, k, z, h) where
-          x_hat: reconstruction
-          k: cluster index
-          z: encoder latent
-          h: hidden state after layer
-        """
         z = self.encoder(x)
-        k = self.router(z)  # NOTE: For training with exploration, call router(z, tau, eps) externally
+        k = self.router(z)
         h = self.layer(z, active_cluster=k)
         x_hat = self.decoder(h)
         return x_hat, k, z, h
@@ -564,36 +523,29 @@ class ASISeed(nn.Module):
                 self.buffers[k].pop(0)
 
     def grow_cluster(self, k: int, grow_rank: int = 1):
-        """Wrapper to grow cluster k and rebuild EMA."""
         self.layer.grow_cluster(k, grow_rank)
         if self._ema is not None:
             self.rebuild_ema()
 
     def consolidate_cluster(self, k: int, num_exemplars: int = 64):
-        """
-        Distill cluster k's buffer into its residual subspace via SVD-like consolidation.
-        This creates abstract memory.
-        """
         buf = self.buffers[k]
         if len(buf) < num_exemplars:
             return
         device = self.layer.U.device
         with torch.no_grad():
             sample_idx = random.sample(range(len(buf)), min(num_exemplars, len(buf)))
-            Z = torch.stack([buf[i] for i in sample_idx], dim=0).to(device)  # (N, D)
+            Z = torch.stack([buf[i] for i in sample_idx], dim=0).to(device)
             Z = F.normalize(Z, dim=1)
-            U_svd, S_svd, Vt_svd = torch.svd(Z.t())  # Z = U S V^T
+            U_svd, S_svd, Vt_svd = torch.svd(Z.t())
             top_k = min(8, U_svd.size(1))
-            abstract_basis = U_svd[:, :top_k]  # (D, top_k)
+            abstract_basis = U_svd[:, :top_k]
 
-            # Blend into V_res
             old_V = self.layer.V_res[k].data
             if old_V.numel() > 0:
                 combined = torch.cat([old_V, abstract_basis], dim=1)
                 Q, _ = torch.linalg.qr(combined)
                 new_rank = min(Q.size(1), old_V.size(1) + 4)
                 self.layer.V_res[k].data = Q[:, :new_rank]
-                # Rebuild U_res to match
                 self.layer.U_res[k].data = torch.randn(self.layer.n_out, new_rank, device=device) * 0.01
 
     def prediction_loss(self, h: torch.Tensor, x_target: torch.Tensor) -> torch.Tensor:
@@ -602,10 +554,6 @@ class ASISeed(nn.Module):
         pred = self.predict_head(h)
         return F.mse_loss(pred, x_target)
 
-    # -----------------------------
-    # NEW: Easy-to-use growth checking!
-    # -----------------------------
-
     def check_and_grow_cluster(self, k: int, loss: float,
                                window_size: int = 50,
                                improvement_threshold: float = 0.01,
@@ -613,60 +561,185 @@ class ASISeed(nn.Module):
                                verbose: bool = True) -> bool:
         """
         Check if cluster k has plateaued and grow it if needed.
-        Call this after each training step!
-
-        Args:
-            k: Cluster index
-            loss: Current loss value
-            window_size: How many recent losses to track (default 50)
-            improvement_threshold: Minimum improvement needed (default 0.01)
-            grow_rank: How much to grow by (default 2)
-            verbose: Print when growth happens (default True)
-
-        Returns:
-            True if growth occurred, False otherwise
-
-        Example usage:
-            loss = train_step(...)
-            if model.check_and_grow_cluster(k, loss.item()):
-                print("Growth happened!")
         """
         stats = self.stats[k]
 
-        # Track loss
         stats.recent_losses.append(loss)
         stats.samples += 1
 
-        # Keep window size manageable
         if len(stats.recent_losses) > window_size:
             stats.recent_losses.pop(0)
 
-        # Need enough samples to check
         if len(stats.recent_losses) < window_size:
             return False
 
-        # Check if plateaued
         first_half = stats.recent_losses[:window_size // 2]
         second_half = stats.recent_losses[window_size // 2:]
         first_avg = sum(first_half) / len(first_half)
         second_avg = sum(second_half) / len(second_half)
         improvement = first_avg - second_avg
 
-        # If not improving enough, GROW!
         if improvement < improvement_threshold and second_avg > 0.015:
             old_rank = self.layer.U_res[k].shape[1] if self.layer.U_res[k].numel() > 0 else 0
             self.grow_cluster(k, grow_rank=grow_rank)
             new_rank = self.layer.U_res[k].shape[1]
             stats.expansions += 1
-            stats.recent_losses.clear()  # Reset after growth
+            stats.recent_losses.clear()
 
             if verbose:
-                print(
-                    f"🌱 GROWTH! Cluster {k}: rank {old_rank} → {new_rank} (loss={second_avg:.4f}, improvement={improvement:.4f})")
+                print(f"🌱 GROWTH! Cluster {k}: rank {old_rank} → {new_rank} "
+                      f"(loss={second_avg:.4f}, improvement={improvement:.4f})")
 
             return True
 
         return False
+
+    # ========================================
+    # RECURSIVE REFINEMENT METHODS
+    # ========================================
+
+    def refine_answer(self, x_input: torch.Tensor, x_current: torch.Tensor,
+                      tau: float = 0.5, eps: float = 0.0) -> Tuple[torch.Tensor, int, torch.Tensor]:
+        """
+        Try to improve current answer by re-processing it with the input.
+        This is the key to recursive refinement!
+
+        Args:
+            x_input: Original input (the question)
+            x_current: Current answer attempt
+            tau: Temperature for routing
+            eps: Epsilon for exploration
+
+        Returns:
+            (refined_output, cluster_used, latent_state)
+        """
+        # Combine current answer with input to guide refinement
+        combined = x_input + 0.3 * x_current
+
+        # Encode the combined state
+        z = self.encoder(combined)
+
+        # Route (can explore or exploit based on tau/eps)
+        k = self.router(z, tau=tau, eps=eps)
+
+        # Process through cluster
+        h = self.layer(z, active_cluster=k)
+
+        # Generate refined output
+        x_refined = self.decoder(h)
+
+        return x_refined, k, h
+
+    def evaluate_improvement(self, x_old: torch.Tensor, x_new: torch.Tensor,
+                             x_target: torch.Tensor) -> Tuple[float, float, bool]:
+        """
+        Evaluate if refinement improved the answer.
+
+        Returns:
+            (old_error, new_error, did_improve)
+        """
+        old_error = F.mse_loss(x_old, x_target).item()
+        new_error = F.mse_loss(x_new, x_target).item()
+
+        improvement = old_error - new_error
+        did_improve = improvement > 0.0001
+
+        return old_error, new_error, did_improve
+
+    def recursive_solve(self, x_input: torch.Tensor, x_target: torch.Tensor,
+                        max_iterations: int = 5, tau: float = 1.0, eps: float = 0.1,
+                        verbose: bool = False) -> Tuple[torch.Tensor, dict]:
+        """
+        Recursively refine the answer, like humans iterating on a puzzle.
+
+        Inspired by TRM (Tiny Recursive Model) paper - deep supervision
+        through iterative refinement.
+
+        Args:
+            x_input: The question/input grid
+            x_target: The desired output
+            max_iterations: How many refinement attempts
+            tau: Temperature (high = explore, low = exploit)
+            eps: Epsilon-greedy exploration
+            verbose: Print iteration details
+
+        Returns:
+            (best_answer, info_dict)
+        """
+        # Initial attempt (forward pass)
+        z = self.encoder(x_input)
+        k = self.router(z, tau=tau, eps=eps)
+        h = self.layer(z, active_cluster=k)
+        x_current = self.decoder(h)
+
+        # Track refinement process
+        # Store DETACHED versions for tracking, but keep live version for backprop
+        attempts_detached = [x_current.detach()]
+        attempts_live = [x_current]  # Keep non-detached for backprop!
+        errors = [F.mse_loss(x_current, x_target).item()]
+        clusters_used = [k]
+        improvements = []
+
+        if verbose:
+            print(f"  Initial: error={errors[0]:.5f}, cluster={k}")
+
+        # Iteratively refine
+        for iteration in range(max_iterations):
+            # Try to improve current answer
+            x_refined, k_used, h_refined = self.refine_answer(
+                x_input, x_current.detach(),  # Detach input to refinement
+                tau=tau * 0.8,  # Gradually reduce exploration
+                eps=eps * 0.8
+            )
+
+            # Evaluate improvement
+            old_err, new_err, improved = self.evaluate_improvement(
+                x_current, x_refined, x_target
+            )
+
+            attempts_detached.append(x_refined.detach())
+            attempts_live.append(x_refined)  # Keep non-detached!
+            errors.append(new_err)
+            clusters_used.append(k_used)
+            improvements.append(new_err - old_err)
+
+            if verbose:
+                status = "✓" if improved else "✗"
+                print(f"  Iter {iteration + 1}: error={new_err:.5f}, "
+                      f"cluster={k_used}, improvement={improvements[-1]:+.5f} {status}")
+
+            # Update current answer
+            x_current = x_refined
+
+            # Early stopping if converged
+            if new_err < 0.0001:
+                if verbose:
+                    print(f"  → Converged at iteration {iteration + 1}")
+                break
+
+        # Determine if model is "stuck"
+        is_stuck = (
+                len(improvements) >= 3 and
+                sum(improvements[-3:]) > -0.001 and
+                errors[-1] > 0.01
+        )
+
+        info = {
+            'attempts': attempts_detached,  # Use detached for info
+            'errors': errors,
+            'clusters_used': clusters_used,
+            'improvements': improvements,
+            'iterations': len(attempts_detached) - 1,
+            'final_error': errors[-1],
+            'is_stuck': is_stuck,
+            'best_iteration': int(np.argmin(errors))
+        }
+
+        # Return LIVE (non-detached) best attempt for backprop!
+        best_idx = info['best_iteration']
+        best_answer = attempts_live[best_idx]  # Use live version!
+
+        return best_answer, info
 
 
 # -----------------------------
@@ -691,11 +764,7 @@ class TrainConfig:
 
 
 def run_basic(cfg: TrainConfig):
-    """
-    Basic self-discovery training loop.
-    The model sees a continuous stream and discovers clusters/features on its own.
-    Growth happens when a cluster plateaus.
-    """
+    """Basic self-discovery training loop."""
     device = torch.device(cfg.device)
     model = ASISeed(
         input_dim=cfg.input_dim,
@@ -709,7 +778,6 @@ def run_basic(cfg: TrainConfig):
     stream = CuriosityStream(input_dim=cfg.input_dim, num_sources=5, seed=42)
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=cfg.lr)
 
-    # Optional realtime viz
     viz = None
     if RealtimeViz is not None:
         try:
@@ -721,16 +789,13 @@ def run_basic(cfg: TrainConfig):
         for step in range(cfg.steps):
             x = to_device(stream.next()).to(device)
 
-            # Encode
             z = model.encoder(x)
 
-            # Route WITH EXPLORATION (anneal over time)
             progress = step / cfg.steps
-            tau = 2.0 - 1.4 * progress  # 2.0 → 0.6
-            eps = 0.2 - 0.18 * progress  # 0.2 → 0.02
+            tau = 2.0 - 1.4 * progress
+            eps = 0.2 - 0.18 * progress
             k = model.router(z, tau=tau, eps=eps)
 
-            # Forward
             h = model.layer(z, active_cluster=k)
             x_hat = model.decoder(h)
 
@@ -746,24 +811,20 @@ def run_basic(cfg: TrainConfig):
                 model.layer.V.grad[:] = orthogonalize_to_(model.layer.V.grad, model.layer.protected_basis_V)
             opt.step()
 
-            # EMA update
             ema_update_(model._ema, model, beta=cfg.ema_beta)
 
             with torch.no_grad():
                 model.router.update_centroid(k, z.detach())
             model.update_buffers(k, z.detach())
 
-            # Realtime viz update
             if viz is not None and step % 2 == 0:
                 cent = model.router.centroids.detach().cpu().numpy()
                 ranks = [model.layer.U_res[i].shape[1] for i in range(model.num_clusters)]
                 viz.send(z=z.detach().cpu().numpy(), k=int(k), centroids=cent, ranks=ranks)
 
-            # NEW: Use the easy growth checking!
             if step % cfg.grow_check_every == 0:
                 if model.check_and_grow_cluster(
-                        k,
-                        loss.item(),
+                        k, loss.item(),
                         window_size=cfg.plateau_window,
                         improvement_threshold=cfg.plateau_improve_eps,
                         grow_rank=cfg.grow_rank_step
@@ -779,8 +840,8 @@ def run_basic(cfg: TrainConfig):
                         xx = to_device(stream.next()).to(device)
                         yy, kk, _z, _h = model._ema(xx)
                         losses.append(float(F.mse_loss(yy, xx).cpu()))
-                    print(
-                        f"[step {step}] EMA canary MSE={sum(losses) / len(losses):.4f} | last k={k} dist={dist:.3f} | tau={tau:.2f} eps={eps:.3f}")
+                    print(f"[step {step}] EMA canary MSE={sum(losses) / len(losses):.4f} | "
+                          f"last k={k} dist={dist:.3f} | tau={tau:.2f} eps={eps:.3f}")
     finally:
         if viz is not None:
             viz.close()
@@ -795,5 +856,6 @@ if __name__ == "__main__":
     p.add_argument("--model_dim", type=int, default=192)
     p.add_argument("--core_rank", type=int, default=4)
     args = p.parse_args()
-    cfg = TrainConfig(steps=args.steps, input_dim=args.input_dim, model_dim=args.model_dim, core_rank=args.core_rank)
+    cfg = TrainConfig(steps=args.steps, input_dim=args.input_dim,
+                      model_dim=args.model_dim, core_rank=args.core_rank)
     run_basic(cfg)
