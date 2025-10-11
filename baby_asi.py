@@ -8,6 +8,8 @@
 # UPDATED: Router now includes exploration (tau/eps) to prevent cluster collapse!
 # UPDATED: Simplified growth checking for external use
 # UPDATED: Added recursive refinement methods for deep supervision
+# UPDATED: More aggressive recursive refinement (20 iterations vs 5) - like TRM paper
+# UPDATED: Better growth trigger - grows when truly stuck, not just slightly plateaued
 
 import argparse
 import random
@@ -647,7 +649,7 @@ class ASISeed(nn.Module):
         return old_error, new_error, did_improve
 
     def recursive_solve(self, x_input: torch.Tensor, x_target: torch.Tensor,
-                        max_iterations: int = 5, tau: float = 1.0, eps: float = 0.1,
+                        max_iterations: int = 20, tau: float = 1.0, eps: float = 0.1,
                         verbose: bool = False) -> Tuple[torch.Tensor, dict]:
         """
         Recursively refine the answer, like humans iterating on a puzzle.
@@ -655,10 +657,13 @@ class ASISeed(nn.Module):
         Inspired by TRM (Tiny Recursive Model) paper - deep supervision
         through iterative refinement.
 
+        IMPROVEMENT: Increased from 5 to 20 iterations (like TRM paper suggests)
+        for deeper reasoning and better convergence.
+
         Args:
             x_input: The question/input grid
             x_target: The desired output
-            max_iterations: How many refinement attempts
+            max_iterations: How many refinement attempts (default 20, was 5)
             tau: Temperature (high = explore, low = exploit)
             eps: Epsilon-greedy exploration
             verbose: Print iteration details
@@ -688,8 +693,8 @@ class ASISeed(nn.Module):
             # Try to improve current answer
             x_refined, k_used, h_refined = self.refine_answer(
                 x_input, x_current.detach(),  # Detach input to refinement
-                tau=tau * 0.8,  # Gradually reduce exploration
-                eps=eps * 0.8
+                tau=tau * 0.9,  # Gradually reduce exploration (slower decay for 20 iters)
+                eps=eps * 0.9
             )
 
             # Evaluate improvement
@@ -717,11 +722,12 @@ class ASISeed(nn.Module):
                     print(f"  → Converged at iteration {iteration + 1}")
                 break
 
-        # Determine if model is "stuck"
+        # IMPROVED: More aggressive stuck detection
+        # Look at more history (5 vs 3) and use tighter thresholds
         is_stuck = (
-                len(improvements) >= 3 and
-                sum(improvements[-3:]) > -0.001 and
-                errors[-1] > 0.01
+                len(improvements) >= 5 and  # Need at least 5 attempts
+                sum(improvements[-5:]) > -0.0005 and  # Almost no improvement over last 5
+                errors[-1] > 0.005  # Still has significant error
         )
 
         info = {
